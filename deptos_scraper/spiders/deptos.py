@@ -6,6 +6,7 @@ import scrapy
 
 PAGE_SIZE = 48
 DESDE_RE = re.compile(r'_Desde_\d+')
+COORDS_RE = re.compile(r'center=(-?[\d.]+)%2C(-?[\d.]+)')
 
 
 class DeptosSpider(scrapy.Spider):
@@ -46,14 +47,25 @@ class DeptosSpider(scrapy.Spider):
                 if value == None: value = ''
                 data_table[key.strip()] = value.strip()
 
+        # La ficha trae un mapa estático de Google (img data-testid="static-map") cuyo src incluye
+        # las coordenadas del centro del mapa, ej. "...&center=-33.3746734%2C-70.4990592&...".
+        # No hay lat/lon en ningún otro lado de la página (no hay JSON-LD ni data-attributes con
+        # "latitude"), así que se extraen por regex de esa URL.
+        static_map_src = response.css('img[data-testid="static-map"]::attr(src)').get()
+        coords_match = COORDS_RE.search(static_map_src) if static_map_src else None
+        latitud, longitud = coords_match.groups() if coords_match else (None, None)
+
         for text in response.css('body'): # extraemos información básica
             data =  {
                 'titulo': text.css('.ui-pdp-title::text').get(),
                 'precio': text.css('.andes-money-amount__fraction::text').get(),
                 'clp': text.css('.ui-pdp-family--REGULAR .andes-money-amount__fraction::text').get(),
-                'dirección': text.css('#location_and_points .ui-pdp-media__title::text').get(),
+                'dirección': text.css('.ui-vip-location .ui-pdp-media__title ::text').get(),
                 'comuna': text.css('div.ui-pdp-breadcrumb>nav>ol>li>a::attr(title)').getall()[-2],
                 'barrio': text.css('div.ui-pdp-breadcrumb>nav>ol>li>a::attr(title)').getall()[-1],
+                'latitud': latitud,
+                'longitud': longitud,
+                'descripcion': text.css('.ui-pdp-description__content::text').get(),
                 'url': response.url
             }
             data.update(data_table)

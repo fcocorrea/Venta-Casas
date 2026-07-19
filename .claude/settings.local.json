@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m py_compile proyecto_deptos.py)"
+      "Bash(python -m py_compile proyecto_deptos.py)",
+      "Bash(python -c ' *)",
+      "Bash(MPLBACKEND=Agg python proyecto_deptos.py)",
+      "Bash(echo \"EXIT CODE: $?\")",
+      "Read(//tmp/**)"
     ]
   }
 }
