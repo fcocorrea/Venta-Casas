@@ -274,25 +274,29 @@ print(f'Ahora hay {deptos_df.comuna.isna().sum()} comunas con valores nulos')
 comunas = [i for i in deptos_df.comuna.unique() if isinstance(i, str)]
 print('Las comunas únicas que quedan son:', ', '.join(comunas))
 
-# Para los registros donde comuna y barrio siguen nulos, se imputa la comuna por dirección
-# (fuzzy match de texto). Esto depende de que el scraper haya podido extraer 'dirección' -- si no
-# hay ninguna dirección utilizable (como ocurre en el crawl actual de casas, donde ese selector no
-# matchea nada en la ficha de la propiedad) no tiene sentido importar fuzzywuzzy ni intentarlo.
+# Para los registros donde comuna y/o barrio siguen nulos, se imputan con el valor de la casa
+# conocida más cercana en latitud/longitud -- más preciso que fuzzy-matching de texto sobre
+# 'dirección' (que además viene vacía en el crawl actual de casas) y aprovecha que casi todas las
+# filas sí tienen coordenadas (ver deptos.json: solo 1 de 5603 sin latitud/longitud).
 
-com_barr_null = deptos_df.loc[deptos_df.comuna.isna() & deptos_df.barrio.isna()]
-if not com_barr_null.empty and com_barr_null['dirección'].notna().any():
-    from fuzzywuzzy import process
+from scipy.spatial import cKDTree
 
-    coincidences = {}  # {dirección: [comuna, puntaje de coincidencia, índice]}
-    for comuna in comunas:
-        address, score, idx = process.extract(comuna, com_barr_null['dirección'], limit=1)[0]
-        if address not in coincidences or score > coincidences[address][1]:
-            coincidences[address] = [comuna, score, idx]
-    for address, features in coincidences.items():
-        deptos_df.loc[features[2], 'comuna'] = features[0]
-else:
-    print(f'Sin direcciones utilizables para imputar comuna por dirección ({len(com_barr_null)} filas pendientes).')
 
+def impute_nearest_by_location(df: pd.DataFrame, column: str) -> None:
+    has_coords = df['latitud'].notna() & df['longitud'].notna()
+    known = df.loc[df[column].notna() & has_coords]
+    missing = df.loc[df[column].isna() & has_coords]
+    if known.empty or missing.empty:
+        return
+    # ponytail: distancia euclidiana en grados, no haversine -- a la escala de Santiago (unas
+    # decenas de km) el orden de vecino-más-cercano no cambia; pasar a haversine solo si se
+    # necesitan distancias reales en algún otro cálculo.
+    tree = cKDTree(known[['latitud', 'longitud']].to_numpy())
+    _, nearest_idx = tree.query(missing[['latitud', 'longitud']].to_numpy())
+    df.loc[missing.index, column] = known[column].to_numpy()[nearest_idx]
+
+
+impute_nearest_by_location(deptos_df, 'comuna')
 print(f'Ahora hay {deptos_df.comuna.isna().sum()} comunas con valores nulos')
 
 # Barrios:
@@ -302,18 +306,8 @@ print(f'Ahora hay {deptos_df.comuna.isna().sum()} comunas con valores nulos')
 deptos_df.barrio = deptos_df.barrio.str.title()
 print(f'Hay {deptos_df.barrio.isna().sum()} casas sin barrio.')
 
-deptos_without_hood = deptos_df.loc[deptos_df.barrio.isna()]
-if not deptos_without_hood.empty and deptos_without_hood['dirección'].notna().any():
-    from fuzzywuzzy import process
-
-    deptos_with_hood = deptos_df[~deptos_df.barrio.isna()]
-    for idx, direccion in deptos_without_hood['dirección'].items():
-        if pd.isna(direccion):
-            continue
-        _, _, match_idx = process.extract(direccion, deptos_with_hood['dirección'], limit=1)[0]
-        deptos_df.loc[idx, 'barrio'] = deptos_with_hood.loc[match_idx, 'barrio']
-else:
-    print('Sin direcciones utilizables para imputar barrio por dirección; se deja como nulo.')
+impute_nearest_by_location(deptos_df, 'barrio')
+print(f'Ahora hay {deptos_df.barrio.isna().sum()} casas sin barrio.')
 
 # Rangos de valores:
 # revisamos qué atributos tienen valores inverosímiles (mal tipeados o sin sentido) y los
