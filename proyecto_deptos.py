@@ -148,10 +148,11 @@ index_deptos_sin_superficie = deptos_df[deptos_df['Superficie útil'].isna() | (
 print(f'Casas sin superficie: {len(index_deptos_sin_superficie)}')
 deptos_df.drop(index_deptos_sin_superficie, inplace=True)
 
-# Cuando la superficie útil es mayor que la total (no tiene sentido), se usa la útil como total.
+# Cuando la superficie útil es mayor que la total (no tiene sentido), las columnas vienen
+# invertidas en el aviso: se intercambian.
 
-deptos_df['Superficie total'] = np.where(deptos_df['Superficie útil'] > deptos_df['Superficie total'],
-                                          deptos_df['Superficie útil'], deptos_df['Superficie total'])
+util, total = deptos_df['Superficie útil'], deptos_df['Superficie total']
+deptos_df['Superficie útil'], deptos_df['Superficie total'] = np.minimum(util, total), np.maximum(util, total)
 
 # Con precio y superficie listos, calculamos la variable objetivo.
 
