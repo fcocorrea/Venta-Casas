@@ -295,6 +295,17 @@ print(f'Ahora hay {deptos_df.comuna.isna().sum()} comunas con valores nulos')
 comunas = [i for i in deptos_df.comuna.unique() if isinstance(i, str)]
 print('Las comunas únicas que quedan son:', ', '.join(comunas))
 
+# Signo de latitud/longitud: Santiago de Chile cae siempre en latitud y longitud negativas
+# (hemisferio sur/oeste). Alguna fila llega con el signo invertido (error del scraper, no un dato
+# realmente distinto -- la magnitud sigue siendo la correcta para la comuna), así que se corrige
+# el signo en vez de anular el valor.
+
+lat_lon_signo_invertido = (deptos_df['latitud'] > 0) | (deptos_df['longitud'] > 0)
+if lat_lon_signo_invertido.any():
+    print(f'Corregimos el signo de latitud/longitud en {lat_lon_signo_invertido.sum()} filas.')
+    deptos_df.loc[lat_lon_signo_invertido, 'latitud'] = -deptos_df.loc[lat_lon_signo_invertido, 'latitud'].abs()
+    deptos_df.loc[lat_lon_signo_invertido, 'longitud'] = -deptos_df.loc[lat_lon_signo_invertido, 'longitud'].abs()
+
 # Para los registros donde comuna y/o barrio siguen nulos, se imputan con el valor de la casa
 # conocida más cercana en latitud/longitud -- más preciso que fuzzy-matching de texto sobre
 # 'dirección' (que además viene vacía en el crawl actual de casas) y aprovecha que casi todas las
@@ -373,10 +384,15 @@ for column in bad_ranges:
 # negativo. Se exceptúan bodegas, estacionamientos y antigüedad, donde 0 es válido (una casa puede
 # no tener bodega/estacionamiento, o ser recién construida). Como no se puede saber el valor real,
 # se dejan como nulos para imputar después.
+#
+# latitud/longitud quedan fuera de esta regla: en Santiago ambas son negativas por definición
+# (hemisferio sur/oeste), así que "negativo" no es un error para ellas -- ya se corrigió el único
+# caso real (signo invertido) más arriba, antes de las imputaciones por vecino más cercano.
 
+coordenadas = {'latitud', 'longitud'}
 zero_ok_columns = {'Bodegas', 'Estacionamientos', 'Antigüedad'}
 for column in summary.columns:
-    if deptos_df[column].dtype == object:
+    if deptos_df[column].dtype == object or column in coordenadas:
         continue
     invalid = deptos_df[column] < 0
     if column not in zero_ok_columns:
@@ -570,10 +586,51 @@ deptos_df = deptos_df.drop(columns=['dirección'])
 deptos_df['Gastos comunes'] = deptos_df['Gastos comunes'].apply(parse_measurement).fillna(0)
 deptos_df['Tipo de casa'] = deptos_df['Tipo de casa'].fillna('Casa')
 
-# Orientación: la moda cambia bastante de un barrio a otro (la orientación "buena" depende de cómo
-# está trazada la calle), así que imputar con la moda del barrio es más certero que la moda global.
-# Los 41 barrios del dataset tienen al menos una Orientación conocida, así que esto resuelve casi
-# todo; las filas que además no tienen barrio (72) caen a la moda global como último recurso.
+# Orientación: casas en la misma cuadra (misma calle, lote vecino) casi siempre comparten
+# orientación -- se prioriza imputar desde la casa conocida más cercana en línea recta, y solo si
+# esa distancia real es chica (calle/cuadra, no "mismo barrio en general"). Para eso hace falta la
+# distancia real en metros (a diferencia de comuna/barrio, donde solo importaba el orden del
+# vecino más cercano), así que aquí sí se usa haversine en vez de distancia euclidiana en grados.
+
+ORIENTACION_VECINO_MAX_M = 150  # ponytail: umbral fijo (~una cuadra corta); ajustar si el sector tiene lotes más grandes
+
+
+def haversine_m(lat1, lon1, lat2, lon2):
+    """Distancia en línea recta (metros) entre dos puntos lat/lon."""
+    radio_tierra_m = 6_371_000
+    phi1, phi2 = np.radians(lat1), np.radians(lat2)
+    delta_phi = np.radians(lat2 - lat1)
+    delta_lambda = np.radians(lon2 - lon1)
+    a = np.sin(delta_phi / 2) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(delta_lambda / 2) ** 2
+    return 2 * radio_tierra_m * np.arcsin(np.sqrt(a))
+
+
+def impute_orientacion_by_nearest_neighbor(df: pd.DataFrame, column: str, max_distance_m: float) -> None:
+    """Imputa `column` con el valor de la casa conocida más cercana, solo si esa casa está a menos
+    de `max_distance_m`. Deja sin imputar (NaN) los casos sin un vecino lo bastante cerca, para que
+    el fallback de moda por barrio los resuelva."""
+    has_coords = df['latitud'].notna() & df['longitud'].notna()
+    known = df.loc[df[column].notna() & has_coords]
+    missing = df.loc[df[column].isna() & has_coords]
+    if known.empty or missing.empty:
+        return
+    tree = cKDTree(known[['latitud', 'longitud']].to_numpy())
+    _, nearest_idx = tree.query(missing[['latitud', 'longitud']].to_numpy())
+    nearest = known.iloc[nearest_idx]
+    distance_m = haversine_m(missing['latitud'].to_numpy(), missing['longitud'].to_numpy(),
+                              nearest['latitud'].to_numpy(), nearest['longitud'].to_numpy())
+    close_enough = distance_m <= max_distance_m
+    df.loc[missing.index[close_enough], column] = nearest[column].to_numpy()[close_enough]
+
+
+impute_orientacion_by_nearest_neighbor(deptos_df, 'Orientación', ORIENTACION_VECINO_MAX_M)
+print(f'Orientación: {deptos_df["Orientación"].isna().sum()} nulos restantes tras imputar por vecino cercano.')
+
+# Orientación (fallback): la moda cambia bastante de un barrio a otro (la orientación "buena"
+# depende de cómo está trazada la calle), así que para lo que el vecino cercano no resolvió,
+# imputar con la moda del barrio es más certero que la moda global. Los 41 barrios del dataset
+# tienen al menos una Orientación conocida, así que esto resuelve casi todo; las filas que además
+# no tienen barrio caen a la moda global como último recurso.
 
 moda_por_barrio = deptos_df.groupby('barrio')['Orientación'].agg(lambda s: s.mode().iat[0] if not s.mode().empty else np.nan)
 orientacion_na = deptos_df['Orientación'].isna()
@@ -584,26 +641,6 @@ if orientacion_na.any():
     moda_global = deptos_df['Orientación'].mode().iat[0]
     print(f'{orientacion_na.sum()} casas sin barrio ni Orientación: se imputan con la moda global ({moda_global}).')
     deptos_df.loc[orientacion_na, 'Orientación'] = moda_global
-
-# Cercanía a Clínica Alemana, Estadio Español, Colegio Monte Tabor y Nazaret, Colegio Las Ursulinas
-# y Portal La Dehesa:
-# este scrape no tiene lat/lon (se agregó al spider -- ver deptos_scraper/spiders/deptos.py -- pero
-# recién sirve para la próxima corrida del crawl, unas 9 horas). Sin coordenadas no hay distancia
-# real que calcular, así que se aproxima por barrio: los 5 lugares están todos concentrados en el
-# corredor Manquehue-La Dehesa (borde Vitacura / Lo Barnechea), y se listan a mano los barrios del
-# dataset que caen en ese corredor. Es una aproximación geográfica basada en conocimiento del
-# sector, no una distancia medida -- fácil de ajustar editando el set de abajo. Las casas sin
-# barrio conocido (barrio nulo) se clasifican como 'Lejos' por defecto, porque no se puede
-# confirmar la cercanía.
-
-barrios_cercanos = {
-    'La Dehesa', 'Los Trapenses', 'El Huinganal',  # Lo Barnechea: Portal La Dehesa, Monte Tabor y Nazaret y Las Ursulinas están acá
-    'Lo Curro', 'Santa María De Manquehue', 'Estadio Manquehue', 'Estadio Croata', 'La Llavería', 'Jardín Del Este',  # Vitacura: entorno de Clínica Alemana y Estadio Español (eje Manquehue)
-    'Los Dominicos',  # Las Condes: borde con La Dehesa por Camino Los Trapenses
-}
-deptos_df['cercania'] = np.where(deptos_df['barrio'].isin(barrios_cercanos), 'Cerca', 'Lejos')
-print('Cercanía a Clínica Alemana / Estadio Español / Monte Tabor y Nazaret / Las Ursulinas / Portal La Dehesa:')
-print(deptos_df['cercania'].value_counts())
 
 print(f'Orientación: {deptos_df["Orientación"].isna().sum()} nulos restantes')
 
@@ -669,8 +706,7 @@ deptos_df['precio UF'] = np.where(deptos_df['UM'] == 'UF', deptos_df['precio'], 
 candidatas = deptos_df[
     (deptos_df['precio UF'] < 15000) &
     (deptos_df['Dormitorios'] >= 3) &
-    (deptos_df['Baños'] >= 2) &
-    (deptos_df['cercania'] == 'Cerca')
+    (deptos_df['Baños'] >= 2)
 ].copy()
 candidatas['negociacion'] = np.where(candidatas['precio UF'] > 13500, 'Negociar', 'Precio Ok')
 
