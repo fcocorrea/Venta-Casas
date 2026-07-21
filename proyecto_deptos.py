@@ -11,17 +11,38 @@
 #
 # Objetivos:
 # Predecir el precio de una casa a partir de sus características y comparar ese precio predicho
-# con el precio real, para determinar si está sobre o bajo su precio de mercado. Se trata de un
-# problema de regresión.
+# con el precio real, para determinar si está sobre o bajo su precio de mercado. Es un problema
+# de regresión: "sobre/bajo mercado" no se entrena como un modelo aparte, se deriva del residuo
+# (precio real - predicho) / predicho de un único modelo de precio.
 #
-# Implementación, en tres grandes pasos:
+# Target: se modela log(precio en CLP), no "precio unitario" (CLP/m²). Dividir por superficie
+# para normalizar la escala impone elasticidad = 1 entre precio y superficie (un lote de 200 m²
+# valdría exactamente el doble que uno de 100 m², todo lo demás igual), lo que no es cierto en
+# terrenos (retornos decrecientes a la superficie). El modelo debe aprender esa elasticidad a
+# partir de log(Superficie total) y log(Superficie útil) como features, no asumirla de antemano.
+# "precio unitario" se mantiene como feature/diagnóstico para detección de outliers -- tal como ya
+# se usa más abajo -- pero no como variable objetivo.
+#
+# Implementación, en cinco grandes pasos:
 # 1) Obtención de datos: se extraen vía web scraping con Scrapy (ver deptos_scraper/spiders/deptos.py;
 #    se ejecuta con `scrapy crawl deptos -O deptos.json`, documentado en CLAUDE.md).
-# 2) Limpieza de datos: homologar y transformar los datos, que no vienen expresados de forma consistente.
+# 2) Limpieza de datos: homologar y transformar los datos, que no vienen expresados de forma
+#    consistente. Las imputaciones que aprenden de los datos (KDTree de comuna/barrio, moda por
+#    barrio, match por correlación en atributos discretos, regresión logística en binarios) deben
+#    ajustarse solo con el fold de entrenamiento una vez exista el split -- no con el dataframe
+#    completo, como ocurre hoy -- y ninguna debe usar precio/clp/precio unitario como predictor,
+#    para no filtrar el target hacia adentro de una feature.
 # 3) Exploración: entender los datos para adaptarlos a un modelo de regresión.
-# 4) Modelos: probar varios modelos y quedarnos con el más adecuado.
-# 5) Producción: ubicar las casas en un mapa, coloreadas de rojo (sobrevaloradas) a verde
-#    (subvaloradas).
+# 4) Modelos: separar train/test, probar un modelo lineal (log-log, interpretable) y uno de
+#    árboles con boosting (captura interacciones comuna × superficie × amenities), evaluar con
+#    MdAPE/MAE/RMSE en CLP (no solo en escala log) contra un baseline de mediana por barrio, y
+#    quedarnos con el más adecuado.
+# 5) Producción: para cada casa, calcular el residuo (precio real - predicho) / predicho y
+#    ordenar de mayor a menor descuento -- ese ranking reemplaza el filtro fijo actual (precio UF
+#    < 15000, Dormitorios >= 3, etc.), que no se ajusta por comuna ni superficie. Las
+#    restricciones del comprador (dormitorios, baños, cercanía) se aplican como filtro sobre el
+#    ranking, no como criterio principal de selección. El resultado se ubica en un mapa,
+#    coloreado de rojo (residuo positivo, sobrevalorada) a verde (residuo negativo, subvalorada).
 
 import os
 
