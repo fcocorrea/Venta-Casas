@@ -581,10 +581,14 @@ deptos_df = deptos_df.drop(columns=['Unidades totales'])
 #   no paga gasto común de edificio).
 # - Tipo de casa: nulo en las mismas 12 fichas de proyecto sin 'Unidades totales'; siguen siendo
 #   casas, se etiquetan como 'Casa' (la categoría más común y no hay una mejor para esas fichas).
+# - descripcion: nula quiere decir que el vendedor no escribió texto libre, no que no haya nada
+#   que decir de la casa -- se rellena con 'titulo' (siempre presente), que es la mejor
+#   aproximación textual disponible.
 
 deptos_df = deptos_df.drop(columns=['dirección'])
 deptos_df['Gastos comunes'] = deptos_df['Gastos comunes'].apply(parse_measurement).fillna(0)
 deptos_df['Tipo de casa'] = deptos_df['Tipo de casa'].fillna('Casa')
+deptos_df['descripcion'] = deptos_df['descripcion'].fillna(deptos_df['titulo'])
 
 # Orientación: casas en la misma cuadra (misma calle, lote vecino) casi siempre comparten
 # orientación -- se prioriza imputar desde la casa conocida más cercana en línea recta, y solo si
@@ -713,4 +717,167 @@ candidatas['negociacion'] = np.where(candidatas['precio UF'] > 13500, 'Negociar'
 print(f'Casas candidatas: {len(candidatas)} de {len(deptos_df)}')
 print(candidatas['negociacion'].value_counts())
 candidatas.sort_values('precio unitario').to_excel('casas_candidatas.xlsx', index=False)
+
+
+"""
+=======================================================================================
+PASO 4 -- ESTRATEGIA DE PREPROCESAMIENTO PARA EL MODELO (diseño, aún no implementado)
+=======================================================================================
+
+Punto de partida medido sobre deptos_limpios.xlsx (5.597 filas x 74 columnas), no supuesto:
+sin nulos, pero con tres problemas que condicionan todo lo que sigue.
+
+  (a) 37 de las 74 columnas son CONSTANTES (varianza cero). Son los amenities binarios que
+      el scrape solo trae marcados 'Sí' (Piscina no, pero sí Jacuzzi, Sauna, Ascensor,
+      Amoblado, Cisterna, ...). No es que la casa no los tenga: el vendedor solo marca lo
+      que hay, nunca lo que falta, así que 'nulo' significaba "no informado" y la imputación
+      por regresión logística de más arriba los rellenó todos con la única clase presente.
+      Quedan 15 binarias con varianza real (Piscina, Terraza, Comedor, Living, Patio,
+      Dormitorio en suite, Jardín, Cocina, Aire acondicionado, Calefacción, TV por cable,
+      Gas natural, Con conexión para lavarropas, Conserjería, Acceso controlado).
+  (b) Asimetría extrema en las superficies: skew de 69 en 'Superficie útil' (máx 250.000 m²)
+      y 60 en 'Superficie total' (máx 400.000 m²), más 'Antigüedad' con skew 15 (máx 939
+      años) y 'Cantidad de pisos' con 12 (máx 25). El recorte de outliers de más arriba se
+      aplicó sobre 'precio unitario', no sobre estas columnas, así que siguen sucias.
+  (c) Fuga de target: 'precio', 'clp', 'precio UF', 'precio unitario' y 'UM' son todas el
+      target o transformaciones suyas. 'UM' además codifica el tramo de precio (solo las
+      publicaciones caras se listan en UF), así que es un proxy y no una feature.
+
+ORDEN DE OPERACIONES (no negociable)
+------------------------------------
+Primero el split, después todo lo demás. Cada paso que "aprende" algo de los datos (media
+y desvío del escalado, categorías del encoder, vocabulario e IDF del texto, medianas de
+imputación, umbral de colinealidad) se ajusta SOLO con el fold de entrenamiento y se aplica
+al de test. Hoy el script hace lo contrario -- imputa y recorta sobre el dataframe completo
+-- así que estos pasos van dentro de un Pipeline/ColumnTransformer de sklearn, no sueltos.
+Split estratificado por 'comuna': los tres niveles de precio son muy distintos y hay que
+asegurar que ambos folds los representen.
+
+1. ESCALADO DE FEATURES (normalización vs. estandarización)
+-----------------------------------------------------------
+La decisión no es una sola para todo el dataset, va por forma de la distribución:
+
+  - Superficies ('Superficie útil', 'Superficie total') y 'Gastos comunes' (skew 7,4):
+    log1p PRIMERO, StandardScaler DESPUÉS. Estandarizar una distribución con skew 69 no
+    la arregla -- deja la masa de los datos aplastada en un rango mínimo y el outlier a 40
+    desvíos igual de dominante. El log es lo que corrige la forma; el escalado solo centra.
+    Además el log es lo correcto por teoría: en un modelo hedónico el precio responde a la
+    superficie de forma multiplicativa, y log(precio) ~ log(superficie) da directamente la
+    elasticidad (ver cabecera del archivo).
+  - Conteos discretos y acotados ('Dormitorios' 1-14, 'Baños' 1-18, 'Estacionamientos',
+    'Bodegas', 'Cantidad de pisos'): StandardScaler a secas. Ya son de rango chico y
+    aproximadamente simétricos (skew < 1,2 en dormitorios y baños); el log no aporta.
+  - 'Antigüedad': acotar primero a un rango plausible (0-120 años; los 939 son basura que
+    sobrevivió a la limpieza) y luego estandarizar.
+  - 'latitud'/'longitud': NO escalar por separado ni tratarlas como dos features numéricas
+    independientes -- ver punto 4, se convierten en features de distancia.
+  - Binarias 0/1: no se escalan, ya están en [0,1].
+
+  Normalización (MinMax) queda descartada como default: es sensible al máximo, y con
+  máximos de 400.000 m² comprimiría el 99% de los datos a un rango casi nulo. Solo tendría
+  sentido si se cambia a una red neuronal, y aun así después del log. Si tras el log
+  quedaran colas pesadas, la alternativa robusta es RobustScaler (usa mediana e IQR, que es
+  el mismo criterio de percentil_limits() que ya usa este script).
+
+  Nota: para el modelo de árboles con boosting el escalado es indiferente (los splits son
+  invariantes a transformaciones monótonas). Se mantiene igual para que ambos modelos
+  compartan el mismo ColumnTransformer, y porque el log sí cambia lo que aprende el lineal.
+
+2. CODIFICACIÓN DE CATEGÓRICAS
+-------------------------------
+Medida la cardinalidad real, aquí no hay ninguna categórica verdaderamente alta:
+
+  - Baja cardinalidad -> One-Hot con drop='first' (evita la trampa de la variable ficticia
+    en el modelo lineal) y handle_unknown='infrequent_if_exist':
+      * 'comuna' (3 niveles)
+      * 'Tipo de casa' (5: Casa 4.902, Chalet 491, Dúplex 162, Tríplex 41, Cabaña 1)
+        -> agrupar Tríplex y Cabaña en una categoría 'Otro'; con 1 sola cabaña, esa columna
+        one-hot es un identificador de fila disfrazado de feature.
+      * 'Orientación' (8 niveles). Es cíclica en teoría (N-NE-E-...), pero como categórica
+        de 8 niveles con 5.597 filas no vale la pena el seno/coseno; one-hot y listo.
+  - Cardinalidad media -> 'barrio' (41 niveles) es el caso a decidir. One-Hot lo deja en 41
+    columnas para 5.597 filas, y 7 barrios tienen menos de 30 casas (Puente Nuevo tiene 1).
+    Estrategia: Target Encoding sobre log(precio) con suavizado bayesiano hacia la media de
+    la comuna, ajustado dentro de CV anidado (out-of-fold) para no filtrar el target. El
+    barrio es la feature de ubicación más fuerte del dataset, y el target encoding conserva
+    ese orden de precios en una sola columna en vez de 41 dispersas. Los barrios con <30
+    casas colapsan casi por completo hacia la media de su comuna, que es exactamente el
+    comportamiento deseado. Alternativa más simple si el encoding out-of-fold da problemas
+    de fuga: One-Hot agrupando los 7 barrios raros en 'Otro' (35 columnas).
+  - Ordinal Encoding: no se usa. Ninguna categórica tiene orden natural, y asignarle uno
+    arbitrario (barrio 0..40) le inventaría al modelo lineal una relación monótona falsa.
+    Los conteos que sí son ordinales ('Dormitorios', 'Baños') ya vienen como enteros.
+  - 'UM': se descarta (fuga, ver punto (c) arriba).
+
+3. VECTORIZACIÓN DE TEXTO
+--------------------------
+Hay dos campos de texto libre: 'titulo' (4.520 valores únicos) y 'descripcion' (5.486).
+El texto es la única fuente de señal para atributos que la ficha estructurada no captura:
+estado de conservación, remodelaciones, vista, calidad de terminaciones, urgencia de venta.
+
+  - Faltantes: ya resuelto aguas arriba -- 'descripcion' nula se rellena con 'titulo'
+    (siempre presente). Para el modelo se concatenan ambos campos en un solo documento
+    ('titulo' + ' ' + 'descripcion'), lo que además hace que las filas imputadas no queden
+    con el título duplicado pesando doble en el vector.
+  - Baseline: TF-IDF con ngram_range=(1,2), min_df=5 (descarta typos y direcciones únicas),
+    max_df=0.7 (descarta el boilerplate de la inmobiliaria, que se repite en miles de
+    avisos), lista de stopwords en español, y normalización previa de acentos y minúsculas.
+    Sobre eso, TruncatedSVD a ~50-100 componentes: la matriz TF-IDF dispersa se lleva mal
+    con los modelos de árboles y con una matriz densa de features numéricas.
+  - Alternativa a evaluar contra el baseline: embeddings de un modelo multilingüe
+    (p. ej. sentence-transformers, paraphrase-multilingual-MiniLM) que capturan sinónimos
+    que TF-IDF no ve ("impecable" ~ "excelente estado"). Con 5.597 documentos cortos y en
+    español el costo es bajo. Se adopta solo si mejora el MdAPE de forma medible; si no,
+    queda TF-IDF, que además es interpretable.
+  - Riesgo a controlar: la descripción suele mencionar el precio o la superficie en texto
+    ("vendo en 12.000 UF"). Eso es fuga directa del target. Antes de vectorizar hay que
+    borrar del documento los patrones numéricos de precio (UF, CLP, $, millones) con una
+    regex. Sin ese filtro el modelo "predice" leyendo la respuesta.
+
+4. INGENIERÍA Y SELECCIÓN DE FEATURES
+--------------------------------------
+Features de dominio a construir:
+
+  - ratio_construido = Superficie útil / Superficie total. Distingue la casa grande en lote
+    chico de la casa chica en lote grande, que a igual superficie total valen muy distinto.
+    Es la feature que el target 'precio unitario' original borraba por construcción.
+  - superficie_terreno = Superficie total - Superficie útil (terreno no construido).
+  - baños_por_dormitorio y m2_por_dormitorio: proxies de estándar/calidad de la casa,
+    independientes del tamaño absoluto.
+  - Distancias reales (haversine) a los polos de valor del sector -- Clínica Alemana,
+    Estadio Español, Portal La Dehesa, los colegios del corredor Manquehue-La Dehesa --
+    calculadas desde 'latitud'/'longitud'. Esto reemplaza y mejora el antiguo campo
+    'cercania' 'Cerca'/'Lejos', que era una lista de barrios escrita a mano: una distancia
+    continua en metros conserva el gradiente que la etiqueta binaria tiraba a la basura.
+    Ahora es viable porque las coordenadas quedaron completas (99,98%) tras corregir el bug
+    del filtro de negativos.
+  - Alternativa/complemento a las distancias: distancia al centroide de la comuna, y
+    densidad local de la oferta (número de casas en un radio de 500 m vía cKDTree), que
+    aproxima "qué tan consolidado está el sector".
+  - 'Gastos comunes' > 0 como binaria (indica condominio con administración) además del
+    valor continuo: el 50% de las casas tiene 0, así que la columna es medio indicador y
+    medio monto.
+
+Selección y eliminación de redundancia:
+
+  - Eliminar de entrada las 37 columnas constantes. No aportan información, inflan la
+    matriz y ensucian cualquier ranking de importancia. Un VarianceThreshold(0) lo hace
+    automáticamente y sigue funcionando si un crawl futuro les da varianza.
+  - Eliminar identificadores: 'url' (5.597 valores únicos = una fila cada uno).
+  - Eliminar el bloque de fuga: 'precio', 'clp', 'precio UF', 'precio unitario', 'UM'.
+  - Colinealidad: 'Superficie útil' y 'Superficie total' están fuertemente correlacionadas
+    entre sí y con 'Dormitorios'/'Baños' (el heatmap ya generado lo muestra). Para el modelo
+    lineal, calcular VIF y descartar iterativamente lo que supere ~10, o directamente
+    quedarse con log(Superficie total) + ratio_construido en vez de las dos superficies
+    crudas (misma información, sin la correlación de 0,9). Para el modelo de árboles la
+    colinealidad no rompe las predicciones, pero sí reparte la importancia entre features
+    gemelas y hace ilegible el SHAP, así que conviene igual.
+  - Selección final: importancia por permutación sobre el fold de validación (no la
+    importancia por impureza de sklearn, que sobrevalora las features de alta cardinalidad
+    como el target encoding de barrio). Descartar lo que tenga importancia no distinguible
+    de cero y reentrenar, verificando que el MdAPE no empeore.
+  - Feature de control obligatoria: comparar siempre contra el baseline de mediana de
+    precio/m² por barrio. Si toda esta ingeniería no le gana a esa línea de una sola
+    columna, el modelo no justifica su complejidad.
+"""
 
