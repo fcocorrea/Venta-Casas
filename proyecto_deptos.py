@@ -696,6 +696,18 @@ sin_coordenadas = deptos_df['latitud'].isna() | deptos_df['longitud'].isna()
 print(f'Eliminamos {sin_coordenadas.sum()} casa(s) sin coordenadas (no imputable por vecino cercano).')
 deptos_df = deptos_df.drop(deptos_df[sin_coordenadas].index)
 
+# Coordenadas fuera de la Región Metropolitana: se detectó una publicación ("Casa, Oficina Y
+# Local En Venta Lujan, Mendoza, Argentina", etiquetada como comuna "Las Condes") con coordenadas
+# en Mendoza, Argentina -- a más de 130 km al otro lado de la cordillera, un error de scraping/
+# clasificación del sitio de origen, no una casa real del mercado de Santiago. Se descartan
+# filas con longitud > -69,5°: la propiedad más extrema pero real del dataset (un refugio en
+# Farellones/La Parva, dentro del territorio de Lo Barnechea que sí llega hasta la cordillera)
+# queda en -70,22°, muy por debajo de ese corte.
+
+fuera_de_rm = deptos_df['longitud'] > -69.5
+print(f'Eliminamos {fuera_de_rm.sum()} casa(s) con coordenadas fuera de la Región Metropolitana.')
+deptos_df = deptos_df.drop(deptos_df[fuera_de_rm].index)
+
 # =======================================================================================
 # PASO 3 -- EXPLORACIÓN
 # =======================================================================================
@@ -759,13 +771,13 @@ deptos_df.sort_values('precio unitario').to_excel('deptos_limpios.xlsx', index=F
 print(deptos_df.info())
 print(deptos_df.describe())
 
-# Lo que llama la atención de info() (5.285 filas x 74 columnas, tras descartar la única casa sin
-# coordenadas y los casi duplicados -- ver PASO 2): el dataset quedó 100% completo, sin nulos en
-# ninguna columna.
+# Lo que llama la atención de info() (5.284 filas x 74 columnas, tras descartar la única casa sin
+# coordenadas, los casi duplicados y la publicación con coordenadas en Mendoza -- ver PASO 2): el
+# dataset quedó 100% completo, sin nulos en ninguna columna.
 # - 52 columnas son int64 en {0, 1} (los amenities binarios). Con 'Sí' -> 1 / resto -> 0 en vez de
 #   regresión logística, ya ninguna quedó constante, pero sí muy desbalanceada: 4 amenities
 #   (Cancha de básquetbol, Con cancha polideportiva, Cancha de paddle, Con cancha de fútbol) están
-#   presentes en menos del 1% de las casas (3 a 29 de 5.285) y aportan casi nada de señal.
+#   presentes en menos del 1% de las casas (3 a 29 de 5.284) y aportan casi nada de señal.
 #
 # Lo que llama la atención de describe():
 # - 'precio' tiene skew ~13 y rango de 3.790 a 1.240.000.000: mezcla UF y CLP sin convertir según
@@ -789,14 +801,14 @@ print(deptos_df.describe())
 # PASO 4 -- ESTRATEGIA DE PREPROCESAMIENTO PARA EL MODELO (diseño, aún no implementado)
 # =======================================================================================
 #
-# Punto de partida medido sobre deptos_limpios.xlsx (5.285 filas x 74 columnas, ver análisis de
+# Punto de partida medido sobre deptos_limpios.xlsx (5.284 filas x 74 columnas, ver análisis de
 # info()/describe() más arriba), no supuesto: sin nulos en ninguna columna, pero con tres
 # problemas que condicionan todo lo que sigue.
 #
 #   (a) Amenities binarios MUY desbalanceados. Con 'Sí' -> 1 / resto -> 0 (ver imputación más
 #       arriba) ninguna columna quedó constante, pero varias están cerca: 4 amenities (Cancha de
 #       básquetbol, Con cancha polideportiva, Cancha de paddle, Con cancha de fútbol) aparecen en
-#       menos del 1% de las casas (3 a 29 de 5.285). Aportan casi nada de señal y son candidatas a
+#       menos del 1% de las casas (3 a 29 de 5.284). Aportan casi nada de señal y son candidatas a
 #       agruparse en una única feature ("tiene cancha deportiva") o descartarse.
 #   (b) Asimetría extrema en las superficies: skew de 70 en 'Superficie útil' (máx 250.000 m²)
 #       y 59 en 'Superficie total' (máx 400.000 m²), más 'Cantidad de pisos' con skew 12 (máx
@@ -1146,7 +1158,7 @@ print(f'MdAPE con texto: {mdape_con_texto:.2f}%')
 print(f'Diferencia: {mdape_sin_texto - mdape_con_texto:.2f} puntos porcentuales '
       f'({"mejora" if mdape_con_texto < mdape_sin_texto else "empeora"} al agregar texto)')
 
-# CONCLUSIÓN (medida, no supuesta): MdAPE sin texto 8,24% vs. con texto 8,47% -- el bloque de
+# CONCLUSIÓN (medida, no supuesta): MdAPE sin texto 8,42% vs. con texto 8,74% -- el bloque de
 # TF-IDF+SVD empeora levemente en vez de mejorar. No se adopta: la señal que 'descripcion'
 # podría aportar (estado, remodelaciones, vista) ya queda cubierta por las features estructurales
 # para este dataset/modelo, o el ruido de 50 componentes SVD sobre ~4.200 documentos le pesa más
@@ -1208,4 +1220,81 @@ X_test_final[[columna_antiguedad]] = escalador_antiguedad.transform(X_test_final
 
 print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
 print(X_train_final[columnas_log_scale + columnas_solo_scale + [columna_antiguedad]].describe())
+
+# =======================================================================================
+# PASO 4e -- FEATURES DE DISTANCIA DESDE LATITUD/LONGITUD
+# =======================================================================================
+# 'latitud'/'longitud' crudas no se usan como feature -- un modelo lineal no puede aprender una
+# relación de valor a partir de dos coordenadas por sí solas (ver PASO 4). En su lugar se calculan
+# distancias reales (haversine, ya definido en PASO 2 para imputar Orientación) a los polos de
+# valor del sector: Clínica Alemana, Estadio Español y Portal La Dehesa -- lugares que las propias
+# publicaciones mencionan como argumento de venta ("a pasos de Portal La Dehesa", ver
+# 'descripcion') y que reemplazan al viejo campo 'cercania' ('Cerca'/'Lejos', eliminado en un
+# commit anterior) con una medida continua en vez de una lista de barrios escrita a mano. Con eso,
+# el modelo ya tiene la señal de "qué tan bien ubicada" está la casa antes de calcular el residuo,
+# así que ese residuo no confunde "buena ubicación no capturada" con sobre/subvaloración real.
+#
+# Coordenadas verificadas por búsqueda web, no de memoria:
+#   - Clínica Alemana (Av. Vitacura 5951, Vitacura): -33,3918 / -70,5729
+#   - Estadio Español (Nevería 4855, Las Condes): -33,4147 / -70,5771
+#   - Portal La Dehesa (Av. La Dehesa, Lo Barnechea): -33,3579 / -70,5152
+#
+# Se deja afuera "colegios del corredor Manquehue-La Dehesa" (ver PASO 4): no es un punto único,
+# es una zona con decenas de colegios, y no correspondía inventarle una coordenada
+# "representativa" a algo que no tiene una.
+#
+# También se agrega distancia al centroide de la propia comuna (aproxima qué tan central o
+# periférica es la casa dentro de su zona). El centroide se calcula SOLO con train -- es una
+# estadística que "aprende" de los datos, igual que el resto de lo que ya se ajusta solo con train
+# en PASO 4 -- y se aplica a test con esos mismos valores, sin recalcularlo ahí.
+
+PUNTOS_DE_INTERES = {
+    'clinica_alemana': (-33.3918, -70.5729),
+    'estadio_espanol': (-33.4147, -70.5771),
+    'portal_la_dehesa': (-33.3579, -70.5152),
+}
+
+
+def agregar_distancias(df: pd.DataFrame, comuna_por_fila: pd.Series, centroide_comuna: pd.DataFrame) -> None:
+    for nombre, (lat_punto, lon_punto) in PUNTOS_DE_INTERES.items():
+        df[f'distancia_{nombre}_m'] = haversine_m(df['remainder__latitud'], df['remainder__longitud'],
+                                                    lat_punto, lon_punto)
+    lat_centroide = comuna_por_fila.map(centroide_comuna['remainder__latitud'])
+    lon_centroide = comuna_por_fila.map(centroide_comuna['remainder__longitud'])
+    df['distancia_centroide_comuna_m'] = haversine_m(df['remainder__latitud'], df['remainder__longitud'],
+                                                       lat_centroide, lon_centroide)
+
+
+centroide_comuna = X_train_final.groupby(X_train['comuna'])[['remainder__latitud', 'remainder__longitud']].mean()
+agregar_distancias(X_train_final, X_train['comuna'], centroide_comuna)
+agregar_distancias(X_test_final, X_test['comuna'], centroide_comuna)
+
+columnas_distancia = [f'distancia_{nombre}_m' for nombre in PUNTOS_DE_INTERES] + ['distancia_centroide_comuna_m']
+print(X_train_final[columnas_distancia].describe())
+print('skew:', X_train_final[columnas_distancia].skew().to_dict())
+
+# Con las distancias calculadas, 'latitud'/'longitud' crudas ya cumplieron su propósito y se
+# eliminan del set de features -- dejarlas junto con las distancias sería redundante (las
+# distancias ya son una transformación de esas mismas dos columnas) y volvería a exponer al
+# modelo lineal a la coordenada cruda que se quería evitar.
+
+X_train_final = X_train_final.drop(columns=['remainder__latitud', 'remainder__longitud'])
+X_test_final = X_test_final.drop(columns=['remainder__latitud', 'remainder__longitud'])
+
+# log1p + estandarizar, mismo criterio que las superficies en PASO 4d: la distancia responde al
+# precio de forma multiplicativa en un modelo hedónico (el mismo argumento que ya se usa para
+# Superficie total/útil, ver cabecera del archivo), y el skew medido arriba lo confirma -- 0,48 a
+# 0,75 en las tres distancias a puntos fijos, pero 3,73 en la del centroide de la propia comuna
+# (por los refugios de Farellones/La Parva, legítimamente lejos de su centroide). Se aplica log1p
+# a las 4 por igual para no tratar distinto a features de la misma familia: no perjudica a las
+# tres que ya estaban casi simétricas, y corrige la que sí lo necesitaba.
+
+X_train_final[columnas_distancia] = np.log1p(X_train_final[columnas_distancia])
+X_test_final[columnas_distancia] = np.log1p(X_test_final[columnas_distancia])
+
+escalador_distancias = StandardScaler()
+X_train_final[columnas_distancia] = escalador_distancias.fit_transform(X_train_final[columnas_distancia])
+X_test_final[columnas_distancia] = escalador_distancias.transform(X_test_final[columnas_distancia])
+
+print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
 
