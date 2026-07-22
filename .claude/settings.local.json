@@ -5,7 +5,12 @@
       "Bash(python -c ' *)",
       "Bash(MPLBACKEND=Agg python proyecto_deptos.py)",
       "Bash(echo \"EXIT CODE: $?\")",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(command -v python)",
+      "Bash(python -c \"import sys; print\\(sys.executable\\); import pandas; print\\(pandas.__file__\\)\")",
+      "Bash(python -m pip show scikit-learn numpy)",
+      "Bash(\"./venv/Scripts/python.exe\" -m py_compile proyecto_deptos.py)",
+      "Bash(\"./venv/Scripts/python.exe\" proyecto_deptos.py)"
     ]
   }
 }

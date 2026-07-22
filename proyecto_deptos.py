@@ -28,10 +28,10 @@
 #    se ejecuta con `scrapy crawl deptos -O deptos.json`, documentado en CLAUDE.md).
 # 2) Limpieza de datos: homologar y transformar los datos, que no vienen expresados de forma
 #    consistente. Las imputaciones que aprenden de los datos (KDTree de comuna/barrio, moda por
-#    barrio, match por correlación en atributos discretos, regresión logística en binarios) deben
-#    ajustarse solo con el fold de entrenamiento una vez exista el split -- no con el dataframe
-#    completo, como ocurre hoy -- y ninguna debe usar precio/clp/precio unitario como predictor,
-#    para no filtrar el target hacia adentro de una feature.
+#    barrio, match por correlación en atributos discretos, umbrales de outlier) se ajustan SOLO
+#    con el fold de entrenamiento -- por eso el split vive en PASO 2b, antes de todas ellas, y no
+#    en PASO 4 -- y ninguna usa precio/clp/precio unitario como predictor, para no filtrar el
+#    target hacia adentro de una feature (ver COLUMNAS_TARGET en la matriz de correlación).
 # 3) Exploración: entender los datos para adaptarlos a un modelo de regresión.
 # 4) Modelos: separar train/test, probar un modelo lineal (log-log, interpretable) y uno de
 #    árboles con boosting (captura interacciones comuna × superficie × amenities), evaluar con
@@ -129,7 +129,7 @@ def parse_measurement(value):
 measurement_columns = [c for c in ['precio', 'clp', 'Superficie total', 'Superficie útil',
                                     'Dormitorios', 'Baños', 'Estacionamientos', 'Bodegas',
                                     'Cantidad de pisos', 'Antigüedad'] if c in deptos_df.columns]
-numeric_attributes = [c for c in measurement_columns if deptos_df[c].dtype == object]
+numeric_attributes = [c for c in measurement_columns if not pd.api.types.is_numeric_dtype(deptos_df[c])]
 print('Columnas de medición ya numéricas:', [c for c in measurement_columns if c not in numeric_attributes])
 print('Columnas de medición a parsear desde texto:', numeric_attributes)
 
@@ -289,24 +289,10 @@ deptos_df.barrio = np.where(deptos_df.comuna == 'Propiedades usadas', np.nan, de
 deptos_df.loc[comunas_a_modificar.index, 'comuna'] = np.nan
 print(f'Hay {deptos_df.comuna.isna().sum()} comunas por imputar.')
 
-# Imputación de valores nulos en comuna:
-# - comuna nula, barrio no: si el barrio identifica una única comuna, la usamos.
-# - si un barrio aparece asociado a más de una comuna, se usa la más frecuente; si no está
-#   asociado a ninguna, en realidad "barrio" contenía el nombre de la comuna.
-
-barrios = deptos_df.loc[deptos_df.comuna.isna(), 'barrio'].dropna().unique().tolist()
-for barrio in barrios:
-    comuna_del_barrio = deptos_df.loc[deptos_df.barrio == barrio, 'comuna'].dropna().unique().tolist()
-    if not comuna_del_barrio:
-        deptos_df.loc[deptos_df.barrio == barrio, 'comuna'] = barrio
-        deptos_df.loc[deptos_df.barrio == barrio, 'barrio'] = np.nan
-    else:
-        comuna = deptos_df.loc[deptos_df.comuna.isin(comuna_del_barrio), 'comuna'].value_counts().idxmax()
-        deptos_df.loc[deptos_df.barrio == barrio, 'comuna'] = comuna
-
-print(f'Ahora hay {deptos_df.comuna.isna().sum()} comunas con valores nulos')
-comunas = [i for i in deptos_df.comuna.unique() if isinstance(i, str)]
-print('Las comunas únicas que quedan son:', ', '.join(comunas))
+# La IMPUTACIÓN de esas comunas nulas (mapeo barrio -> comuna) aprende de la distribución de los
+# datos, así que no puede correr acá: va después del split, ajustada solo con train. Ver
+# "PASO 2b -- SPLIT" más abajo. Lo que queda arriba es la corrección determinista del artefacto
+# del scraper (poner en nulo lo que no es una comuna), que no aprende nada y no necesita el split.
 
 # Signo de latitud/longitud: Santiago de Chile cae siempre en latitud y longitud negativas
 # (hemisferio sur/oeste). Alguna fila llega con el signo invertido (error del scraper, no un dato
@@ -318,6 +304,31 @@ if lat_lon_signo_invertido.any():
     print(f'Corregimos el signo de latitud/longitud en {lat_lon_signo_invertido.sum()} filas.')
     deptos_df.loc[lat_lon_signo_invertido, 'latitud'] = -deptos_df.loc[lat_lon_signo_invertido, 'latitud'].abs()
     deptos_df.loc[lat_lon_signo_invertido, 'longitud'] = -deptos_df.loc[lat_lon_signo_invertido, 'longitud'].abs()
+
+# Filas sin coordenadas: latitud/longitud es la única columna que no se puede imputar por vecino
+# más cercano, porque justamente se necesita la coordenada de la propia fila para buscar al vecino.
+# Es una sola casa en todo el dataset: se descarta.
+#
+# Coordenadas fuera de la Región Metropolitana: se detectó una publicación ("Casa, Oficina Y Local
+# En Venta Lujan, Mendoza, Argentina", etiquetada como comuna "Las Condes") con coordenadas en
+# Mendoza, Argentina -- a más de 130 km al otro lado de la cordillera, un error de scraping/
+# clasificación del sitio de origen, no una casa real del mercado de Santiago. Se descartan filas
+# con longitud > -69,5°: la propiedad más extrema pero real del dataset (un refugio en
+# Farellones/La Parva, dentro del territorio de Lo Barnechea que sí llega hasta la cordillera)
+# queda en -70,22°, muy por debajo de ese corte.
+#
+# Ambos descartes se hacen ACÁ, antes del split, y no más abajo: definir qué filas son datos
+# válidos delimita el universo del problema, no aprende un parámetro de los datos. Todo filtrado de
+# filas tiene que quedar cerrado antes de partir en train/test, para que ambos folds salgan del
+# mismo universo y los índices no se muevan después.
+
+sin_coordenadas = deptos_df['latitud'].isna() | deptos_df['longitud'].isna()
+print(f'Eliminamos {sin_coordenadas.sum()} casa(s) sin coordenadas (no imputable por vecino cercano).')
+deptos_df = deptos_df.drop(deptos_df[sin_coordenadas].index)
+
+fuera_de_rm = deptos_df['longitud'] > -69.5
+print(f'Eliminamos {fuera_de_rm.sum()} casa(s) con coordenadas fuera de la Región Metropolitana.')
+deptos_df = deptos_df.drop(deptos_df[fuera_de_rm].index)
 
 # Duplicados:
 # una misma casa puede quedar publicada más de una vez (mismo corredor republicando el aviso,
@@ -369,6 +380,65 @@ casi_duplicados = encontrar_casi_duplicados(deptos_df)
 print(f'Casas casi duplicadas (misma ubicación y superficie, distinto corredor/precio): {len(casi_duplicados)}')
 deptos_df = deptos_df.drop(casi_duplicados)
 
+# =======================================================================================
+# PASO 2b -- SPLIT TRAIN/TEST (antes de cualquier imputación que aprenda de los datos)
+# =======================================================================================
+# Hasta acá todo lo hecho es determinista fila por fila (parseo de texto, swap útil/total, signo
+# de coordenadas) o filtrado de filas (sin precio, sin superficie, sin coordenadas, fuera de la
+# RM, duplicados). Nada de eso estima un parámetro a partir de la distribución de los datos, así
+# que puede correr sobre el dataset completo sin contaminar nada.
+#
+# Lo que viene después SÍ aprende: modas, medianas, tablas cruzadas, umbrales de outlier y árboles
+# de vecino más cercano. Si esos parámetros se calculan sobre el dataset entero, las filas de test
+# participan de la estadística que después se usa para completarlas, y la métrica final queda
+# optimista sin que se pueda saber en cuánto. Por eso el split va acá y no en PASO 4: de este
+# punto en adelante, todo lo que se estima se estima SOLO con las filas de `indice_train`.
+#
+# El deduplicado tiene que ir antes del split, no después: la misma casa publicada dos veces,
+# repartida una copia a cada fold, es fuga directa -- el modelo vería en entrenamiento la
+# respuesta exacta de una fila de test.
+#
+# Estratificación por 'comuna': los tres niveles de precio son muy distintos y ambos folds deben
+# representarlos en la misma proporción. Las comunas todavía nulas (el artefacto del scraper que
+# se acaba de poner en nulo) forman su propio estrato 'Desconocida' para no perder esas filas ni
+# romper el estratificador -- se imputan más abajo, ya con el split hecho.
+
+from sklearn.model_selection import train_test_split
+
+indice_train, indice_test = train_test_split(
+    deptos_df.index,
+    test_size=0.2,
+    stratify=deptos_df['comuna'].fillna('Desconocida'),
+    random_state=42,
+)
+print(f'Split previo a la limpieza que aprende -> train: {len(indice_train)} filas. '
+      f'test: {len(indice_test)} filas.')
+
+# Imputación de comuna (aprende de los datos -> ajustada SOLO con train):
+# - comuna nula y barrio conocido: si en train ese barrio identifica una comuna, se usa la más
+#   frecuente de train.
+# - comuna nula y el "barrio" es en realidad el nombre de una comuna (el artefacto de la ruta de
+#   navegación descrito arriba): se promueve barrio -> comuna y el barrio queda nulo.
+# - lo que no resuelva ninguna de las dos reglas queda nulo y lo toma el vecino más cercano.
+# Un barrio que solo aparece en test no está en el mapeo y cae al vecino más cercano, que es el
+# comportamiento correcto: train no tiene nada que decir sobre él.
+
+barrios_train = deptos_df.loc[indice_train].dropna(subset=['barrio', 'comuna'])
+barrio_a_comuna = barrios_train.groupby('barrio')['comuna'].agg(lambda s: s.value_counts().idxmax())
+comunas_validas = set(deptos_df.loc[indice_train, 'comuna'].dropna().unique())
+
+comuna_nula = deptos_df['comuna'].isna()
+desde_barrio = comuna_nula & deptos_df['barrio'].isin(barrio_a_comuna.index)
+deptos_df.loc[desde_barrio, 'comuna'] = deptos_df.loc[desde_barrio, 'barrio'].map(barrio_a_comuna)
+
+barrio_es_comuna = deptos_df['comuna'].isna() & deptos_df['barrio'].isin(comunas_validas)
+deptos_df.loc[barrio_es_comuna, 'comuna'] = deptos_df.loc[barrio_es_comuna, 'barrio']
+deptos_df.loc[barrio_es_comuna, 'barrio'] = np.nan
+
+print(f'Comunas imputadas desde el barrio: {desde_barrio.sum()}. '
+      f'Barrios que eran nombre de comuna: {barrio_es_comuna.sum()}.')
+print(f'Quedan {deptos_df.comuna.isna().sum()} comunas nulas para el vecino más cercano.')
+
 # Para los registros donde comuna y/o barrio siguen nulos, se imputan con el valor de la casa
 # conocida más cercana en latitud/longitud -- más preciso que fuzzy-matching de texto sobre
 # 'dirección' (que además viene vacía en el crawl actual de casas) y aprovecha que casi todas las
@@ -378,8 +448,11 @@ from scipy.spatial import cKDTree
 
 
 def impute_nearest_by_location(df: pd.DataFrame, column: str) -> None:
+    """El árbol de vecinos se construye SOLO con filas de train (`indice_train`): son las únicas
+    que pueden "enseñar" un valor. Las filas a completar son de ambos folds -- a una fila de test
+    se le puede asignar la comuna de su vecino de train, pero nunca la de otro vecino de test."""
     has_coords = df['latitud'].notna() & df['longitud'].notna()
-    known = df.loc[df[column].notna() & has_coords]
+    known = df.loc[df.index.isin(indice_train) & df[column].notna() & has_coords]
     missing = df.loc[df[column].isna() & has_coords]
     if known.empty or missing.empty:
         return
@@ -437,8 +510,14 @@ deptos_df['Antigüedad'] = np.where((deptos_df['Antigüedad'] > 1000) | (deptos_
 
 bad_ranges = [c for c in ['Baños', 'Estacionamientos', 'Bodegas', 'Cantidad de pisos', 'Antigüedad'] if c in deptos_df.columns]
 
+# El umbral de corte se lee del top-20 de TRAIN, no del dataset completo: es un parámetro estimado
+# a partir de la distribución (dónde está el salto que delata el error de tipeo), y estimarlo con
+# test adentro sería dejar que test defina su propio criterio de limpieza. Una vez fijado con
+# train, se aplica a ambos folds -- un valor imposible en test se anula igual, pero según el
+# umbral que train consideró imposible.
+
 for column in bad_ranges:
-    top_20 = deptos_df[column].dropna().nlargest(20).sort_values()
+    top_20 = deptos_df.loc[indice_train, column].dropna().nlargest(20).sort_values()
     cut_value = cut_after_relative_jump(top_20, threshold=1.0)
     if cut_value is not None:
         idx = deptos_df[deptos_df[column] >= cut_value].index
@@ -458,7 +537,7 @@ for column in bad_ranges:
 coordenadas = {'latitud', 'longitud'}
 zero_ok_columns = {'Bodegas', 'Estacionamientos', 'Antigüedad'}
 for column in summary.columns:
-    if deptos_df[column].dtype == object or column in coordenadas:
+    if not pd.api.types.is_numeric_dtype(deptos_df[column]) or column in coordenadas:
         continue
     invalid = deptos_df[column] < 0
     if column not in zero_ok_columns:
@@ -530,6 +609,29 @@ plt.figure(figsize=(12, 10))
 sns.heatmap(corr, cmap="Blues", annot=True)
 plt.savefig(os.path.join(GRAFICOS_DIR, 'correlacion_atributos.png'))
 
+# El heatmap SÍ debe mostrar el bloque de target ('precio', 'clp', 'precio unitario'): entender
+# qué atributo correlaciona con el precio es justamente el objetivo del análisis exploratorio.
+#
+# La búsqueda de matches para IMPUTAR, en cambio, no puede verlo. Si un atributo nulo se rellena
+# a partir del precio, ese atributo deja de ser una característica de la casa y pasa a ser una
+# función del target: el modelo lo "usa para predecir" un precio que ya está adentro de la
+# feature. Es la regla que declara la cabecera de este archivo ("ninguna [imputación] debe usar
+# precio/clp/precio unitario como predictor"), y sin este filtro el código la incumplía --
+# medido: 'Estacionamientos' tenía 'clp' como su match de mayor correlación y 20 de sus filas se
+# imputaban directamente desde el precio, más 19 de 'Dormitorios'.
+
+# Además, la matriz que guía la imputación se calcula SOLO con train: qué atributo correlaciona
+# con cuál es un parámetro aprendido de los datos, igual que una media o una moda. El heatmap de
+# arriba sí usa el dataset completo -- es material descriptivo del mercado, no alimenta ninguna
+# decisión del modelo.
+
+COLUMNAS_TARGET = ['precio', 'clp', 'precio unitario']
+
+corr_sin_target = (deptos_df.loc[indice_train]
+                   .drop(columns=COLUMNAS_TARGET, errors='ignore')
+                   .corr(numeric_only=True)
+                   .dropna(axis=0, how='all').dropna(axis=1, how='all'))
+
 
 # Imputación en variables discretas:
 # variables numéricas que toman un número finito de valores, propias de una casa (a diferencia del
@@ -542,15 +644,24 @@ print(na_columns[na_columns.index.isin(discrete_values)])
 
 
 def attribute_correlations(attribute) -> pd.Index:
-    """Atributos ordenados de mayor a menor correlación (absoluta) respecto a `attribute`."""
-    return corr.loc[corr.index != attribute, attribute].sort_values(ascending=False, key=lambda x: abs(x)).index
+    """Atributos ordenados de mayor a menor correlación (absoluta) respecto a `attribute`, sobre
+    la matriz SIN el bloque de target -- ver COLUMNAS_TARGET más arriba."""
+    columna = corr_sin_target[attribute]
+    return columna[columna.index != attribute].sort_values(ascending=False, key=lambda x: abs(x)).index
 
+
+# Las tres funciones de abajo estiman su regla de imputación (tabla cruzada, medianas por grupo,
+# moda) SOLO con las filas de `indice_train`, y la aplican a las filas pendientes de ambos folds.
+# Es el mismo contrato que un transformer de sklearn: fit(train), transform(todo).
 
 def impute_from_discrete_match(attribute: str, match_attribute: str, pending_index: pd.Index) -> pd.Index:
     """Imputa vía la combinación más frecuente en una tabla cruzada con `match_attribute`
     (ej. si 2 dormitorios se combina más seguido con 2 baños, un baño nulo con 2 dormitorios se
-    imputa como 2). Devuelve los índices que siguen sin resolver."""
-    cross_table = pd.crosstab(deptos_df[match_attribute], deptos_df[attribute])
+    imputa como 2). La tabla cruzada se arma con train. Devuelve los índices sin resolver."""
+    train_df = deptos_df.loc[indice_train]
+    cross_table = pd.crosstab(train_df[match_attribute], train_df[attribute])
+    if cross_table.empty:
+        return pending_index
     modes = cross_table.idxmax(axis=1)
     match_values = deptos_df.loc[pending_index, match_attribute]
     resolvable = match_values[match_values.isin(modes.index)]
@@ -560,8 +671,9 @@ def impute_from_discrete_match(attribute: str, match_attribute: str, pending_ind
 
 def impute_from_continuous_match(attribute: str, match_attribute: str, pending_index: pd.Index) -> pd.Index:
     """Agrupa los valores discretos por la mediana de `match_attribute` (que sí es continuo) y
-    asigna el grupo cuya mediana esté más cerca. Devuelve los índices que siguen sin resolver."""
-    grouped_medians = deptos_df.groupby(attribute)[match_attribute].median()
+    asigna el grupo cuya mediana esté más cerca. Las medianas por grupo se calculan con train.
+    Devuelve los índices que siguen sin resolver."""
+    grouped_medians = deptos_df.loc[indice_train].groupby(attribute)[match_attribute].median().dropna()
     if grouped_medians.empty:
         return pending_index
     match_values = deptos_df.loc[pending_index, match_attribute].dropna()
@@ -586,7 +698,7 @@ def allocate_values():
             else:
                 pending_index = impute_from_continuous_match(attribute, match_attribute, pending_index)
         if not pending_index.empty:
-            mode = deptos_df[attribute].mode()
+            mode = deptos_df.loc[indice_train, attribute].mode()
             if not mode.empty:
                 deptos_df.loc[pending_index, attribute] = mode.iloc[0]
         print(f'{attribute}: {deptos_df[attribute].isna().sum()} nulos restantes')
@@ -654,7 +766,7 @@ def impute_orientacion_by_nearest_neighbor(df: pd.DataFrame, column: str, max_di
     de `max_distance_m`. Deja sin imputar (NaN) los casos sin un vecino lo bastante cerca, para que
     el fallback de moda por barrio los resuelva."""
     has_coords = df['latitud'].notna() & df['longitud'].notna()
-    known = df.loc[df[column].notna() & has_coords]
+    known = df.loc[df.index.isin(indice_train) & df[column].notna() & has_coords]
     missing = df.loc[df[column].isna() & has_coords]
     if known.empty or missing.empty:
         return
@@ -676,37 +788,19 @@ print(f'Orientación: {deptos_df["Orientación"].isna().sum()} nulos restantes t
 # tienen al menos una Orientación conocida, así que esto resuelve casi todo; las filas que además
 # no tienen barrio caen a la moda global como último recurso.
 
-moda_por_barrio = deptos_df.groupby('barrio')['Orientación'].agg(lambda s: s.mode().iat[0] if not s.mode().empty else np.nan)
+moda_por_barrio = (deptos_df.loc[indice_train]
+                   .groupby('barrio')['Orientación']
+                   .agg(lambda s: s.mode().iat[0] if not s.mode().empty else np.nan))
 orientacion_na = deptos_df['Orientación'].isna()
 deptos_df.loc[orientacion_na, 'Orientación'] = deptos_df.loc[orientacion_na, 'barrio'].map(moda_por_barrio)
 
 orientacion_na = deptos_df['Orientación'].isna()
 if orientacion_na.any():
-    moda_global = deptos_df['Orientación'].mode().iat[0]
+    moda_global = deptos_df.loc[indice_train, 'Orientación'].mode().iat[0]
     print(f'{orientacion_na.sum()} casas sin barrio ni Orientación: se imputan con la moda global ({moda_global}).')
     deptos_df.loc[orientacion_na, 'Orientación'] = moda_global
 
 print(f'Orientación: {deptos_df["Orientación"].isna().sum()} nulos restantes')
-
-# Latitud/longitud: única columna que puede seguir con un nulo -- impute_nearest_by_location
-# necesita las coordenadas de la propia fila para buscar al vecino más cercano, así que no hay
-# forma de imputarla. Es la única casa sin coordenadas en todo el dataset: se descarta.
-
-sin_coordenadas = deptos_df['latitud'].isna() | deptos_df['longitud'].isna()
-print(f'Eliminamos {sin_coordenadas.sum()} casa(s) sin coordenadas (no imputable por vecino cercano).')
-deptos_df = deptos_df.drop(deptos_df[sin_coordenadas].index)
-
-# Coordenadas fuera de la Región Metropolitana: se detectó una publicación ("Casa, Oficina Y
-# Local En Venta Lujan, Mendoza, Argentina", etiquetada como comuna "Las Condes") con coordenadas
-# en Mendoza, Argentina -- a más de 130 km al otro lado de la cordillera, un error de scraping/
-# clasificación del sitio de origen, no una casa real del mercado de Santiago. Se descartan
-# filas con longitud > -69,5°: la propiedad más extrema pero real del dataset (un refugio en
-# Farellones/La Parva, dentro del territorio de Lo Barnechea que sí llega hasta la cordillera)
-# queda en -70,22°, muy por debajo de ese corte.
-
-fuera_de_rm = deptos_df['longitud'] > -69.5
-print(f'Eliminamos {fuera_de_rm.sum()} casa(s) con coordenadas fuera de la Región Metropolitana.')
-deptos_df = deptos_df.drop(deptos_df[fuera_de_rm].index)
 
 # =======================================================================================
 # PASO 3 -- EXPLORACIÓN
@@ -825,10 +919,21 @@ print(deptos_df.describe())
 # Primero el split, después todo lo demás. Cada paso que "aprende" algo de los datos (media
 # y desvío del escalado, categorías del encoder, vocabulario e IDF del texto, medianas de
 # imputación, umbral de colinealidad) se ajusta SOLO con el fold de entrenamiento y se aplica
-# al de test. Hoy el script hace lo contrario -- imputa y recorta sobre el dataframe completo
-# -- así que estos pasos van dentro de un Pipeline/ColumnTransformer de sklearn, no sueltos.
-# Split estratificado por 'comuna': los tres niveles de precio son muy distintos y hay que
-# asegurar que ambos folds los representen.
+# al de test. Split estratificado por 'comuna': los tres niveles de precio son muy distintos y
+# hay que asegurar que ambos folds los representen.
+#
+# Esto ya está implementado, y el split no vive acá sino en PASO 2b: la limpieza de PASO 2 también
+# aprende de los datos (modas, medianas, tablas cruzadas, KDTree, umbrales de outlier), así que
+# partir recién en PASO 4 dejaba a test participando de su propia imputación. Lo que queda antes
+# del split es solo transformación determinista fila por fila y filtrado de filas.
+#
+# Efecto medido de haberlo corregido: MdAPE 8,43% -> 8,39%, prácticamente sin cambio. Vale la pena
+# dejarlo escrito, porque el resultado no era el esperado: la contaminación existía pero casi no
+# inflaba la métrica. La razón es que las columnas con muchos nulos (Bodegas con 1.446, Cantidad de
+# pisos con 708) resultaron tener importancia por permutación cercana a cero, mientras que las
+# features que dominan el modelo ('Superficie total', y 'm2_por_dormitorio' que se deriva de ella)
+# no tenían nulos que imputar. La corrección igual se justifica: sin ella, ningún número del
+# proyecto era defendible, y no había forma de saber de antemano que el sesgo era chico.
 #
 # 1. ESCALADO DE FEATURES (normalización vs. estandarización)
 # -----------------------------------------------------------
@@ -987,22 +1092,20 @@ X = deptos_df[columnas_entrenamiento].copy()
 y = deptos_df['clp'].copy()
 
 # =======================================================================================
-# PASO 4b -- SPLIT Y CODIFICACIÓN DE CATEGÓRICAS
+# PASO 4b -- CODIFICACIÓN DE CATEGÓRICAS
 # =======================================================================================
-# El encoding de 'barrio' (Target Encoding) aprende del target, así que necesita el split hecho
-# ANTES de ajustarse -- si se ajustara sobre todo X, el valor codificado de cada fila filtraría
-# información de su propio target hacia adentro de la feature. Por eso el split se agrega acá,
-# aunque el pedido original fuera solo sobre encoding: es un prerrequisito, no una decisión nueva
-# (ya está en el "ORDEN DE OPERACIONES" documentado en PASO 4).
+# El split ya está hecho: se define en PASO 2b, antes de toda la limpieza que aprende de los
+# datos. Acá solo se materializa sobre X/y usando esos mismos índices -- NO se vuelve a partir.
+# Repartir de nuevo acá rompería la garantía de PASO 2b: filas que fueron test durante la
+# imputación podrían caer en train ahora, y las medianas/modas con las que se las completó ya
+# habrían sido calculadas sin ellas (o peor, con ellas, según cómo cayera el sorteo).
 #
-# Split estratificado por 'comuna' (80/20): los tres niveles de precio son muy distintos entre
-# comunas y hay que asegurar que ambos folds los representen en la misma proporción.
+# El encoding de 'barrio' (Target Encoding) aprende del target, así que también necesita el split
+# hecho antes de ajustarse: si se ajustara sobre todo X, el valor codificado de cada fila
+# filtraría información de su propio target hacia adentro de la feature.
 
-from sklearn.model_selection import train_test_split
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, stratify=X['comuna'], random_state=42
-)
+X_train, X_test = X.loc[indice_train], X.loc[indice_test]
+y_train, y_test = y.loc[indice_train], y.loc[indice_test]
 print(f'Train: {len(X_train)} filas. Test: {len(X_test)} filas.')
 
 # 'Tipo de casa': Tríplex (40 casas) y Cabaña (1 casa) son demasiado raras para su propia columna
@@ -1158,7 +1261,7 @@ print(f'MdAPE con texto: {mdape_con_texto:.2f}%')
 print(f'Diferencia: {mdape_sin_texto - mdape_con_texto:.2f} puntos porcentuales '
       f'({"mejora" if mdape_con_texto < mdape_sin_texto else "empeora"} al agregar texto)')
 
-# CONCLUSIÓN (medida, no supuesta): MdAPE sin texto 8,42% vs. con texto 8,74% -- el bloque de
+# CONCLUSIÓN (medida, no supuesta): MdAPE sin texto 8,39% vs. con texto 8,40% -- el bloque de
 # TF-IDF+SVD empeora levemente en vez de mejorar. No se adopta: la señal que 'descripcion'
 # podría aportar (estado, remodelaciones, vista) ya queda cubierta por las features estructurales
 # para este dataset/modelo, o el ruido de 50 componentes SVD sobre ~4.200 documentos le pesa más
@@ -1283,8 +1386,8 @@ X_test_final = X_test_final.drop(columns=['remainder__latitud', 'remainder__long
 
 # log1p + estandarizar, mismo criterio que las superficies en PASO 4d: la distancia responde al
 # precio de forma multiplicativa en un modelo hedónico (el mismo argumento que ya se usa para
-# Superficie total/útil, ver cabecera del archivo), y el skew medido arriba lo confirma -- 0,48 a
-# 0,75 en las tres distancias a puntos fijos, pero 3,73 en la del centroide de la propia comuna
+# Superficie total/útil, ver cabecera del archivo), y el skew medido arriba lo confirma -- 0,55 a
+# 0,88 en las tres distancias a puntos fijos, pero 4,06 en la del centroide de la propia comuna
 # (por los refugios de Farellones/La Parva, legítimamente lejos de su centroide). Se aplica log1p
 # a las 4 por igual para no tratar distinto a features de la misma familia: no perjudica a las
 # tres que ya estaban casi simétricas, y corrige la que sí lo necesitaba.
@@ -1297,4 +1400,333 @@ X_train_final[columnas_distancia] = escalador_distancias.fit_transform(X_train_f
 X_test_final[columnas_distancia] = escalador_distancias.transform(X_test_final[columnas_distancia])
 
 print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
+
+# =======================================================================================
+# PASO 4f -- RATIOS ESTRUCTURALES
+# =======================================================================================
+# Se calculan sobre los valores crudos de X_train/X_test -- antes del log1p y el StandardScaler
+# que PASO 4d ya aplicó in-place a 'Superficie útil'/'Superficie total'/'Dormitorios'/'Baños'
+# dentro de X_train_final. Dividir columnas ya estandarizadas no tiene lectura como ratio, solo
+# reproduce el cociente de dos z-scores.
+#
+#   - ratio_construido = Superficie útil / Superficie total: distingue la casa grande en lote
+#     chico de la chica en lote grande, que a igual superficie total valen muy distinto (ver
+#     PASO 4). Va de 0 a 1 por construcción -- la limpieza ya invirtió los pares donde útil >
+#     total (ver commit "Swap Superficie útil/total..." en PASO 2), así que no hace falta acotarlo.
+#   - m2_por_dormitorio = Superficie útil / Dormitorios: proxy de estándar de la casa,
+#     independiente de su tamaño absoluto. Se usa 'útil' y no 'total': el dormitorio se vive en
+#     el área construida, no en el terreno.
+#   - baños_por_dormitorio = Baños / Dormitorios: mismo criterio, otro proxy de estándar.
+#
+# Sin guard contra división por cero: 'Dormitorios' y 'Superficie total' no tienen ceros en todo
+# el dataset limpio, medido, no supuesto (ver mín. de ambas en el describe() de PASO 3).
+
+X_train_final['ratio_construido'] = X_train['Superficie útil'] / X_train['Superficie total']
+X_test_final['ratio_construido'] = X_test['Superficie útil'] / X_test['Superficie total']
+
+X_train_final['m2_por_dormitorio'] = X_train['Superficie útil'] / X_train['Dormitorios']
+X_test_final['m2_por_dormitorio'] = X_test['Superficie útil'] / X_test['Dormitorios']
+
+X_train_final['banos_por_dormitorio'] = X_train['Baños'] / X_train['Dormitorios']
+X_test_final['banos_por_dormitorio'] = X_test['Baños'] / X_test['Dormitorios']
+
+columnas_ratios = ['ratio_construido', 'm2_por_dormitorio', 'banos_por_dormitorio']
+print(X_train_final[columnas_ratios].describe())
+print('skew:', X_train_final[columnas_ratios].skew().to_dict())
+
+# Escalado con el mismo criterio de forma que PASO 4d, medido sobre train (ver skew impreso
+# arriba): ratio_construido (skew 0,75) y baños_por_dormitorio (skew 0,73) son aproximadamente
+# simétricos -- StandardScaler directo, igual que los conteos. m2_por_dormitorio (skew 11,7)
+# hereda la cola pesada de 'Superficie útil' (mismo numerador) y necesita log1p antes de
+# estandarizar, igual que las superficies.
+
+columnas_ratio_simetricos = ['ratio_construido', 'banos_por_dormitorio']
+escalador_ratios = StandardScaler()
+X_train_final[columnas_ratio_simetricos] = escalador_ratios.fit_transform(X_train_final[columnas_ratio_simetricos])
+X_test_final[columnas_ratio_simetricos] = escalador_ratios.transform(X_test_final[columnas_ratio_simetricos])
+
+escalador_m2_dormitorio = StandardScaler()
+X_train_final[['m2_por_dormitorio']] = escalador_m2_dormitorio.fit_transform(
+    np.log1p(X_train_final[['m2_por_dormitorio']]))
+X_test_final[['m2_por_dormitorio']] = escalador_m2_dormitorio.transform(
+    np.log1p(X_test_final[['m2_por_dormitorio']]))
+
+print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
+
+# =======================================================================================
+# PASO 4g -- COLINEALIDAD
+# =======================================================================================
+# Con los ratios ya en el set, 'Superficie útil' queda redundante por construcción: útil = total
+# × ratio_construido. VIF por columna (regresión OLS de cada feature contra el resto -- misma
+# fórmula que statsmodels, sin agregar esa dependencia al proyecto) sobre las columnas ya
+# escaladas de X_train_final cuantifica el problema en vez de suponerlo.
+
+
+def calcular_vif(frame: pd.DataFrame) -> dict:
+    valores = frame.to_numpy()
+    unos = np.ones((valores.shape[0], 1))
+    vif = {}
+    for i, columna in enumerate(frame.columns):
+        y_columna = valores[:, i]
+        resto = np.delete(valores, i, axis=1)
+        diseño = np.hstack([unos, resto])
+        coeficientes, *_ = np.linalg.lstsq(diseño, y_columna, rcond=None)
+        prediccion = diseño @ coeficientes
+        r2 = 1 - np.sum((y_columna - prediccion) ** 2) / np.sum((y_columna - y_columna.mean()) ** 2)
+        vif[columna] = 1 / (1 - r2) if r2 < 0.999999 else np.inf
+    return vif
+
+
+columnas_vif = ['remainder__Superficie útil', 'remainder__Superficie total',
+                'remainder__Dormitorios', 'remainder__Baños'] + columnas_ratios
+print('VIF con los 3 ratios agregados:',
+      {c: round(v, 1) for c, v in calcular_vif(X_train_final[columnas_vif]).items()})
+
+# VIF medido: útil=113,3 / m2_por_dormitorio=84,5 / dormitorios=21,6 / baños=17,1 / total=14,6 /
+# ratio_construido=5,8. 'Superficie útil' y 'm2_por_dormitorio' son las más afectadas -- cada una
+# comparte a 'útil' como numerador con otra feature que ya está en el set (total×ratio_construido
+# y Dormitorios×m2_por_dormitorio respectivamente), así que su VIF se dispara.
+#
+# Iterar VIF>10 al pie de la letra (como plantea PASO 4) no se detiene en 'útil': también
+# descarta 'Superficie total' y 'Baños' (recalculando el VIF tras cada drop, 'Dormitorios' sí
+# termina sobreviviendo), y al modelo lineal no le queda ninguna medida absoluta de superficie,
+# solo 'Dormitorios' + los 3 ratios. Eso contradice la premisa hedónica del propio archivo (el
+# precio responde a la superficie, ver cabecera) -- perder la señal más fuerte del dataset por
+# seguir un umbral de regla de dedo es peor que tolerar VIF residual.
+#
+# Se aplica entonces la alternativa que PASO 4 ya dejaba planteada: dropear SOLO 'Superficie
+# útil' (redundancia exacta, cero información perdida -- se reconstruye con total×ratio) y
+# conservar 'Superficie total'/'Dormitorios'/'Baños' pese a que su VIF post-drop siga por encima
+# de 10 (medido: total=14,3 / baños=14,2 / dormitorios=10,0 / banos_por_dormitorio=9,8 /
+# m2_por_dormitorio=6,7): a diferencia de 'útil', esa correlación no es una identidad
+# matemática, es señal real (cantidad absoluta de baños/dormitorios) que ninguna otra columna
+# reemplaza. Para el modelo de árboles esto es indiferente de por sí (ver PASO 4); para el
+# lineal, infla la varianza de esos coeficientes puntuales sin invalidar la predicción global.
+#
+# CONCLUSIÓN (evaluada, no solo medida): se descarta PCA como alternativa para bajar este VIF
+# residual. Motivos:
+#   - Mata la interpretabilidad que es el objetivo del modelo lineal hedónico (ver cabecera del
+#     archivo): los componentes son combinaciones lineales de columnas heterogéneas (one-hot de
+#     comuna, target encoding de barrio, binarias de amenities, ratios, distancias), así que
+#     ningún coeficiente queda legible como elasticidad o efecto de un amenity.
+#   - Mezcla tipos que PCA no debería recibir juntos: 82 columnas incluyen dummies 0/1 y target
+#     encoding además de las continuas escaladas. La varianza de una dummy no es señal continua
+#     correlacionada, es una categoría -- PCA sobre eso no produce componentes con sentido.
+#   - Ya hay precedente en este archivo de cuándo SÍ conviene reducir dimensionalidad: PASO 4c
+#     aplicó TruncatedSVD (mismo espíritu que PCA), pero solo al bloque disperso de TF-IDF,
+#     separado de las features estructuradas -- y ahí la medición dijo que ni siquiera convenía
+#     (MdAPE empeoró). No hay caso análogo para aplicarlo sobre las features estructuradas.
+#   - El VIF residual no es grave: infla varianza de coeficientes puntuales, no invalida la
+#     predicción, y es indiferente para el modelo de árboles. No justifica el costo.
+
+X_train_final = X_train_final.drop(columns=['remainder__Superficie útil'])
+X_test_final = X_test_final.drop(columns=['remainder__Superficie útil'])
+
+columnas_vif_post = ['remainder__Superficie total', 'remainder__Dormitorios',
+                     'remainder__Baños'] + columnas_ratios
+print('VIF tras dropear Superficie útil:',
+      {c: round(v, 1) for c, v in calcular_vif(X_train_final[columnas_vif_post]).items()})
+print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
+
+# =======================================================================================
+# PASO 4h -- BASELINE: MEDIANA DE PRECIO/M² POR BARRIO
+# =======================================================================================
+# Última pieza pendiente de PASO 4: la feature de control obligatoria. Antes de invertir más en
+# ingeniería de features, hay que fijar el piso que cualquier modelo tiene que superar para
+# justificar su complejidad -- si toda la codificación, escalado y ratios de arriba no le ganan a
+# una sola columna (mediana de precio/m² del barrio), el modelo no vale la pena.
+#
+# 'precio unitario' = clp / Superficie total (misma definición que ya usa el resto del archivo,
+# ver PASO 4a). La mediana se calcula SOLO con train, igual que el resto de lo que "aprende" de
+# los datos en PASO 4, y se aplica a test multiplicando por su propia 'Superficie total' -- nunca
+# se usa una mediana calculada sobre test.
+#
+# Fallback en dos niveles para barrios de test ausentes en train (el split es estratificado por
+# 'comuna', no por 'barrio' -- ver PASO 4b -- así que train no queda garantizado con los 41
+# barrios): si el barrio no está en la mediana de train, se usa la mediana de su 'comuna'; si
+# ninguna fila de esa comuna cayó en train (no debería pasar con el split 80/20 actual, pero el
+# fallback cubre el caso), la mediana global de train.
+
+precio_unitario_train = y_train / X_train['Superficie total']
+
+mediana_por_barrio = precio_unitario_train.groupby(X_train['barrio']).median()
+mediana_por_comuna = precio_unitario_train.groupby(X_train['comuna']).median()
+mediana_global = precio_unitario_train.median()
+
+precio_m2_baseline_test = (
+    X_test['barrio'].map(mediana_por_barrio)
+    .fillna(X_test['comuna'].map(mediana_por_comuna))
+    .fillna(mediana_global)
+)
+prediccion_baseline = precio_m2_baseline_test * X_test['Superficie total']
+
+mdape_baseline = mdape(y_test, prediccion_baseline)
+print(f'MdAPE baseline (mediana precio/m² por barrio): {mdape_baseline:.2f}%')
+print(f'MdAPE modelo HistGB sin texto (PASO 4c): {mdape_sin_texto:.2f}%')
+print(f'Diferencia: {mdape_baseline - mdape_sin_texto:.2f} puntos porcentuales '
+      f'({"el modelo le gana al baseline" if mdape_sin_texto < mdape_baseline else "el baseline le gana al modelo"})')
+
+# =======================================================================================
+# PASO 4i -- 'GASTOS COMUNES' > 0 COMO BINARIA
+# =======================================================================================
+# 'Gastos comunes' ya entra al modelo como valor continuo (log1p + StandardScaler, ver PASO 4d),
+# pero la columna es medio indicador y medio monto: 83,9% de las casas en train vale 0 (sin gasto
+# común, típicamente casas fuera de condominio) y el resto trae un monto real. Se agrega
+# 'tiene_gastos_comunes' = (Gastos comunes > 0) para que el modelo lineal separe el efecto de
+# "está en condominio con administración" del monto en sí, en vez de que ambas señales queden
+# mezcladas en un solo coeficiente sobre log1p(Gastos comunes).
+#
+# Se calcula sobre el valor CRUDO de X_train/X_test (antes del log1p+scale que PASO 4d ya aplicó
+# in-place a 'remainder__Gastos comunes' en X_train_final), mismo criterio que los ratios de
+# PASO 4f. Es binaria: no se escala (ver PASO 4d).
+
+X_train_final['tiene_gastos_comunes'] = (X_train['Gastos comunes'] > 0).astype(int)
+X_test_final['tiene_gastos_comunes'] = (X_test['Gastos comunes'] > 0).astype(int)
+
+print('tiene_gastos_comunes en train:',
+      X_train_final['tiene_gastos_comunes'].value_counts(normalize=True).round(3).to_dict())
+print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
+
+# =======================================================================================
+# PASO 4j -- DENSIDAD LOCAL DE OFERTA
+# =======================================================================================
+# Complementa las distancias de PASO 4e: cuántas otras casas hay a menos de 500 m aproxima qué
+# tan consolidado está el sector -- dos casas a la misma distancia de Portal La Dehesa pueden
+# estar en un sector denso o en un loteo aislado, y esa diferencia le importa al precio. Se
+# cuenta contra TRAIN únicamente (el árbol se construye solo con esas coordenadas, igual que el
+# centroide de comuna en PASO 4e), para no filtrar información de test.
+#
+# cKDTree opera en distancia euclidiana, no haversine, así que lat/lon se proyectan primero a
+# metros locales (proyección equirrectangular: a la escala de Santiago -- unas pocas decenas de
+# km, latitud casi constante -- el error frente a haversine es despreciable, y evita recalcular
+# haversine por pares para un simple conteo por radio). El punto de referencia de la proyección
+# (latitud/longitud media) se toma de TRAIN, mismo criterio de "se ajusta solo con train" del
+# resto de PASO 4.
+
+RADIO_DENSIDAD_M = 500
+RADIO_TIERRA_M = 6_371_000
+
+
+def proyectar_metros(lat: pd.Series, lon: pd.Series, lat0: float, lon0: float) -> np.ndarray:
+    x = RADIO_TIERRA_M * np.radians(lon - lon0) * np.cos(np.radians(lat0))
+    y = RADIO_TIERRA_M * np.radians(lat - lat0)
+    return np.column_stack([x, y])
+
+
+lat0, lon0 = X_train['latitud'].mean(), X_train['longitud'].mean()
+coords_train_m = proyectar_metros(X_train['latitud'], X_train['longitud'], lat0, lon0)
+coords_test_m = proyectar_metros(X_test['latitud'], X_test['longitud'], lat0, lon0)
+
+arbol_densidad = cKDTree(coords_train_m)
+
+# Cada casa de train está en el propio árbol -- se resta 1 para no contarse a sí misma. Test no
+# tiene ese problema: el árbol solo contiene coordenadas de train.
+densidad_train = arbol_densidad.query_ball_point(coords_train_m, r=RADIO_DENSIDAD_M, return_length=True) - 1
+densidad_test = arbol_densidad.query_ball_point(coords_test_m, r=RADIO_DENSIDAD_M, return_length=True)
+
+X_train_final['densidad_oferta_500m'] = densidad_train
+X_test_final['densidad_oferta_500m'] = densidad_test
+
+print(X_train_final['densidad_oferta_500m'].describe())
+print('skew:', X_train_final['densidad_oferta_500m'].skew())
+
+# Escalado con el mismo criterio de forma que el resto de PASO 4: skew medido 0,43, por debajo
+# del umbral de 1,2 que ya usa PASO 4d para los conteos acotados (Dormitorios/Baños) -- a
+# diferencia de las superficies, no tiene cola pesada, así que StandardScaler directo, sin log1p.
+
+escalador_densidad = StandardScaler()
+X_train_final[['densidad_oferta_500m']] = escalador_densidad.fit_transform(X_train_final[['densidad_oferta_500m']])
+X_test_final[['densidad_oferta_500m']] = escalador_densidad.transform(X_test_final[['densidad_oferta_500m']])
+
+print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
+
+# =======================================================================================
+# PASO 4k -- SELECCIÓN FINAL POR IMPORTANCIA DE PERMUTACIÓN
+# =======================================================================================
+# Último paso de PASO 4: con las columnas de X_train_final ya armadas (categóricas codificadas,
+# numéricas escaladas, ratios, distancias, densidad, binaria de gastos comunes), se mide qué
+# aporta cada una y se descarta lo que no distingue de ruido.
+#
+# Importancia por PERMUTACIÓN, no por impureza de sklearn: la de impureza sobrevalora columnas de
+# alta cardinalidad como 'target__barrio' (más posibilidades de split = más impureza explicada
+# por azar), y acá 'target__barrio' es justamente una de las features más fuertes del dataset
+# (ver PASO 4), así que ese sesgo sí distorsionaría el ranking.
+#
+# Se mide sobre un fold de VALIDACIÓN separado de train, nunca sobre test: decidir qué features
+# entran al modelo mirando el desempeño en test sería la misma fuga que ajustar un hiperparámetro
+# ahí, y test dejaría de ser un holdout limpio para la evaluación final. Split 80/20 estratificado
+# por 'comuna', mismo criterio que el split original de PASO 4b.
+
+X_train_sel, X_val_sel, y_train_sel, y_val_sel = train_test_split(
+    X_train_final, y_train, test_size=0.2, stratify=X_train['comuna'], random_state=42
+)
+
+modelo_seleccion = HistGradientBoostingRegressor(random_state=42)
+modelo_seleccion.fit(X_train_sel, np.log(y_train_sel))
+
+mdape_val_completo = mdape(y_val_sel, np.exp(modelo_seleccion.predict(X_val_sel)))
+print(f'MdAPE en validación ({X_train_sel.shape[1]} columnas): {mdape_val_completo:.2f}%')
+
+from sklearn.inspection import permutation_importance
+
+resultado_permutacion = permutation_importance(
+    modelo_seleccion, X_val_sel, np.log(y_val_sel), n_repeats=10, random_state=42, n_jobs=-1
+)
+
+importancias = pd.DataFrame({
+    'feature': X_val_sel.columns,
+    'importancia_media': resultado_permutacion.importances_mean,
+    'importancia_std': resultado_permutacion.importances_std,
+}).sort_values('importancia_media')
+print(importancias.to_string(index=False))
+
+# No distinguible de cero: el intervalo [media - std, media + std] incluye 0 -- la caída de score
+# al permutar la columna no es consistente entre repeticiones, así que no hay evidencia de que el
+# modelo la use de verdad (mismo criterio que documentación de sklearn recomienda para interpretar
+# permutation_importance).
+
+columnas_sin_senal = importancias.loc[
+    importancias['importancia_media'] - importancias['importancia_std'] <= 0, 'feature'
+].tolist()
+print(f'Columnas sin señal distinguible de cero ({len(columnas_sin_senal)}):', columnas_sin_senal)
+
+columnas_final_reducidas = [c for c in X_train_final.columns if c not in columnas_sin_senal]
+
+modelo_reducido = HistGradientBoostingRegressor(random_state=42)
+modelo_reducido.fit(X_train_sel[columnas_final_reducidas], np.log(y_train_sel))
+mdape_val_reducido = mdape(y_val_sel, np.exp(modelo_reducido.predict(X_val_sel[columnas_final_reducidas])))
+print(f'MdAPE en validación ({len(columnas_final_reducidas)} columnas): {mdape_val_reducido:.2f}%')
+print(f'Diferencia: {mdape_val_reducido - mdape_val_completo:.2f} puntos porcentuales')
+
+# Solo se descartan las columnas si el MdAPE en validación no empeora -- si empeora, alguna de
+# esas columnas "sin señal" para el modelo de este split sí aportaba, y se prefiere conservar el
+# feature set completo antes que perder precisión por ahorrar columnas.
+
+if mdape_val_reducido <= mdape_val_completo:
+    X_train_final = X_train_final.drop(columns=columnas_sin_senal)
+    X_test_final = X_test_final.drop(columns=columnas_sin_senal)
+    print(f'MdAPE no empeora: se descartan {len(columnas_sin_senal)} columnas sin señal.')
+else:
+    print('MdAPE empeora al descartar: se conservan todas las columnas.')
+
+print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
+
+# ADVERTENCIA SOBRE ESTE CRITERIO -- la comparación de arriba NO es concluyente.
+#
+# Se mide una sola partición de validación, y la diferencia entre quedarse con 82 o con 40
+# columnas (0,2 puntos porcentuales) es más chica que la variación que produce cambiar la semilla
+# del split. Medido sobre tres semillas distintas, el mismo modelo y el mismo feature set dan
+# MdAPE de 8,15% / 8,29% / 8,51%: un rango de 0,36 puntos, casi el doble de la "diferencia" que
+# acá decide si se descartan 42 columnas o ninguna.
+#
+# La prueba está en que el criterio ya cambió de resultado una vez sin que se tocara ninguna
+# feature: antes de corregir la contaminación train/test de PASO 2 concluía "no empeora, se
+# descartan 44 columnas", y con la limpieza ya ajustada solo con train concluye lo contrario.
+# La decisión la estaba tomando el ruido de partición, no la señal.
+#
+# Para que esto sea una decisión y no un sorteo hay que reemplazar la validación simple por
+# RepeatedKFold y descartar una columna solo si su pérdida de importancia es consistente entre
+# folds -- pendiente. Mientras tanto se conserva el feature set completo, que es la opción
+# conservadora: una columna irrelevante le cuesta poco a un modelo de árboles, y descartar una
+# que sí aportaba no se recupera.
 

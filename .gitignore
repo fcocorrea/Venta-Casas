@@ -1,7 +1,14 @@
 __pycache__/
 *.json
 crawl_log.txt
+venv/
 
 !/CLAUDE.md
 !/.claude/
 !/.claude/**
+
+# Skills de terceros instalados con `npx skills add` -- se reinstalan con ese mismo comando, y
+# .claude/skills es un symlink que no viaja bien entre sistemas operativos. Va después de las
+# negaciones de /.claude/ a propósito: en .gitignore gana el último patrón que matchea.
+.agents/
+.claude/skills/
