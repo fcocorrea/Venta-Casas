@@ -152,6 +152,20 @@ deptos_df = deptos_df.drop(sin_precio.index)
 # rango (ej. "45 a 52") cuando se vende más de una casa en el mismo proyecto; parse_measurement ya
 # toma el valor mínimo del rango, igual que antes.
 #
+# Valores de superficie implausiblemente chicos (ej. "1,18 m²", "1 m²") no son medidas reales --
+# ninguna casa se vende con 1-4 m² de superficie útil o total, así que es el mismo tipo de dato
+# roto que un nulo, no una casa real. Se detectaron 6 casos donde un campo trae un valor así
+# mientras el otro trae uno plausible (160-553 m²): se anulan ANTES del fill cruzado de abajo,
+# para que se resuelvan con el valor bueno del otro campo -- si no, el swap útil/total de más
+# abajo (pensado para columnas invertidas, no para basura) los "arregla" dejando la basura adentro
+# igual, solo que en la columna equivocada.
+
+SUPERFICIE_MINIMA_PLAUSIBLE = 5  # ponytail: umbral conservador (menor que un baño chico); subir si aparecen más casos límite
+deptos_df['Superficie útil'] = np.where(deptos_df['Superficie útil'] <= SUPERFICIE_MINIMA_PLAUSIBLE,
+                                         np.nan, deptos_df['Superficie útil'])
+deptos_df['Superficie total'] = np.where(deptos_df['Superficie total'] <= SUPERFICIE_MINIMA_PLAUSIBLE,
+                                          np.nan, deptos_df['Superficie total'])
+
 # Cuando falta superficie total o superficie útil pero no la otra, rellenamos con la que sí está.
 # Las casas sin ninguna de las dos se descartan, porque no hay forma de saber si están con
 # sobreprecio.
@@ -416,9 +430,12 @@ deptos_df['Antigüedad'] = np.where((deptos_df['Antigüedad'] > 1000) | (deptos_
 
 # El mismo tipo de revisión aplica a otros atributos discretos propios de una casa (a diferencia
 # de un departamento, no hay "número de piso de la unidad" ni "departamentos por piso"; en cambio
-# "Cantidad de pisos" puede tener el mismo tipo de error de tipeo, ej. 2013 en vez de 2).
+# "Cantidad de pisos" puede tener el mismo tipo de error de tipeo, ej. 2013 en vez de 2). Se
+# incluye también 'Antigüedad' acá: el filtro de arriba (>1.000 o <0) no descarta el caso de 939
+# años, que sigue siendo un error de tipeo evidente para una casa en estas comunas -- el mismo
+# corte por salto relativo que ya se usa para las demás lo anula sin tener que hardcodear "939".
 
-bad_ranges = [c for c in ['Baños', 'Estacionamientos', 'Bodegas', 'Cantidad de pisos'] if c in deptos_df.columns]
+bad_ranges = [c for c in ['Baños', 'Estacionamientos', 'Bodegas', 'Cantidad de pisos', 'Antigüedad'] if c in deptos_df.columns]
 
 for column in bad_ranges:
     top_20 = deptos_df[column].dropna().nlargest(20).sort_values()
@@ -758,8 +775,13 @@ print(deptos_df.describe())
 #   siguen con la asimetría extrema que documenta el PASO 4 más abajo: sin recorte de outliers,
 #   esos máximos son lotes/proyectos atípicos reales, no errores, pero exigen log1p antes de
 #   cualquier modelo lineal.
-# - 'Antigüedad' llega a 939 años y 'Cantidad de pisos' a 25 -- valores extremos que ya no se
-#   descartan al no recortar outliers, y quedan pendientes para el PASO 4.
+# - 'Antigüedad': el caso de 939 años (imposible, ver "Rangos de valores" en PASO 2) ya se anula
+#   ahí mismo con el mismo mecanismo de salto relativo que usan Baños/Estacionamientos/Bodegas/
+#   Cantidad de pisos, y se reimputa como el resto de las discretas -- máximo actual 371 años.
+#   Sigue siendo alto para un valor real, pero ya no es un error de tipeo evidente como 939; el
+#   recorte a un rango plausible (0-120) queda para el escalado del PASO 4, no para la limpieza.
+# - 'Cantidad de pisos' llega a 25 -- valor extremo que ya no se descarta al no recortar
+#   outliers, y queda pendiente para el PASO 4.
 # - 'Gastos comunes' es 0 en 83,7 % de las filas (el valor con el que se rellenó el nulo): conviene
 #   tratarla también como binaria "tiene o no gasto común", además de su valor continuo.
 
@@ -777,9 +799,11 @@ print(deptos_df.describe())
 #       menos del 1% de las casas (3 a 29 de 5.285). Aportan casi nada de señal y son candidatas a
 #       agruparse en una única feature ("tiene cancha deportiva") o descartarse.
 #   (b) Asimetría extrema en las superficies: skew de 70 en 'Superficie útil' (máx 250.000 m²)
-#       y 59 en 'Superficie total' (máx 400.000 m²), más 'Antigüedad' con skew 16 (máx 939
-#       años) y 'Cantidad de pisos' con 12 (máx 25). La limpieza ya no recorta outliers de
-#       ninguna columna (ni siquiera 'precio unitario'), así que todas siguen sucias.
+#       y 59 en 'Superficie total' (máx 400.000 m²), más 'Cantidad de pisos' con skew 12 (máx
+#       25). La limpieza ya no recorta outliers de ninguna columna (ni siquiera 'precio
+#       unitario'), así que todas siguen sucias. 'Antigüedad' ya bajó de skew 16 (máx 939, un
+#       error de tipeo evidente, anulado y reimputado en la limpieza) a skew ~2,1 (máx 371) --
+#       sigue alta para un valor real, así que igual se acota a 0-120 antes de estandarizar.
 #   (c) Fuga de target: 'precio', 'clp', 'precio unitario' y 'UM' son todas el target o
 #       transformaciones suyas. 'UM' además codifica el tramo de precio (solo las publicaciones
 #       caras se listan en UF), así que es un proxy y no una feature.
@@ -808,8 +832,9 @@ print(deptos_df.describe())
 #   - Conteos discretos y acotados ('Dormitorios' 1-14, 'Baños' 1-18, 'Estacionamientos',
 #     'Bodegas', 'Cantidad de pisos'): StandardScaler a secas. Ya son de rango chico y
 #     aproximadamente simétricos (skew < 1,2 en dormitorios y baños); el log no aporta.
-#   - 'Antigüedad': acotar primero a un rango plausible (0-120 años; los 939 son basura que
-#     sobrevivió a la limpieza) y luego estandarizar.
+#   - 'Antigüedad': acotar primero a un rango plausible (0-120 años; el caso de 939 ya se anuló
+#     y reimputó en la limpieza, pero quedan valores de 140-371 años que siguen siendo demasiado
+#     altos para una casa real) y luego estandarizar.
 #   - 'latitud'/'longitud': NO escalar por separado ni tratarlas como dos features numéricas
 #     independientes -- ver punto 4, se convierten en features de distancia.
 #   - Binarias 0/1: no se escalan, ya están en [0,1].
@@ -920,4 +945,267 @@ print(deptos_df.describe())
 #   - Feature de control obligatoria: comparar siempre contra el baseline de mediana de
 #     precio/m² por barrio. Si toda esta ingeniería no le gana a esa línea de una sola
 #     columna, el modelo no justifica su complejidad.
+
+# =======================================================================================
+# PASO 4a -- SELECCIÓN DE COLUMNAS DE ENTRENAMIENTO
+# =======================================================================================
+# Primer paso concreto del preprocesamiento: definir qué entra al modelo antes de imputar,
+# escalar o codificar nada (eso se ajusta dentro del split, ver "ORDEN DE OPERACIONES" arriba).
+# Target: 'clp' (se modela log(clp), ver cabecera del archivo). 'precio', 'precio unitario' y
+# 'UM' quedan fuera por ser el target o transformaciones/proxies suyas -- 'precio unitario' en
+# particular es clp / Superficie total, así que dejarla como feature junto a 'Superficie total'
+# filtraría el target casi exactamente. Los binarios se derivan por dtype (igual que
+# measurement_columns más arriba) en vez de listarlos a mano, porque son exactamente las
+# columnas que la imputación de amenities dejó en 'Sí'/resto -> 1/0.
+
+columnas_binarias = [c for c in deptos_df.columns if deptos_df[c].dtype == 'int64']
+
+columnas_entrenamiento = [
+    'latitud', 'longitud', 'descripcion',
+    'Superficie útil', 'Superficie total',
+    'Dormitorios', 'Baños', 'Estacionamientos', 'Bodegas',
+    'Antigüedad', 'Cantidad de pisos',
+    'Orientación', 'Gastos comunes',
+    'comuna', 'barrio', 'Tipo de casa',
+] + columnas_binarias
+
+print(f'Columnas de entrenamiento: {len(columnas_entrenamiento)}')
+
+X = deptos_df[columnas_entrenamiento].copy()
+y = deptos_df['clp'].copy()
+
+# =======================================================================================
+# PASO 4b -- SPLIT Y CODIFICACIÓN DE CATEGÓRICAS
+# =======================================================================================
+# El encoding de 'barrio' (Target Encoding) aprende del target, así que necesita el split hecho
+# ANTES de ajustarse -- si se ajustara sobre todo X, el valor codificado de cada fila filtraría
+# información de su propio target hacia adentro de la feature. Por eso el split se agrega acá,
+# aunque el pedido original fuera solo sobre encoding: es un prerrequisito, no una decisión nueva
+# (ya está en el "ORDEN DE OPERACIONES" documentado en PASO 4).
+#
+# Split estratificado por 'comuna' (80/20): los tres niveles de precio son muy distintos entre
+# comunas y hay que asegurar que ambos folds los representen en la misma proporción.
+
+from sklearn.model_selection import train_test_split
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=X['comuna'], random_state=42
+)
+print(f'Train: {len(X_train)} filas. Test: {len(X_test)} filas.')
+
+# 'Tipo de casa': Tríplex (40 casas) y Cabaña (1 casa) son demasiado raras para su propia columna
+# one-hot -- la de Cabaña sería un identificador de fila disfrazado de feature (ver PASO 4). Se
+# agrupan en 'Otro' antes de codificar. Es una renombrada fija de categorías (no aprende nada del
+# target ni de la distribución de train), así que se aplica igual en train y test sin riesgo de
+# fuga -- a diferencia del Target Encoding de 'barrio' más abajo, esto no necesita ir después del
+# split por seguridad, pero se deja acá junto al resto de la codificación para que quede junto.
+
+tipos_raros = {'Tríplex', 'Cabaña'}
+X_train['Tipo de casa'] = X_train['Tipo de casa'].replace(tipos_raros, 'Otro')
+X_test['Tipo de casa'] = X_test['Tipo de casa'].replace(tipos_raros, 'Otro')
+
+# Categóricas de baja cardinalidad ('comuna' 3 niveles, 'Tipo de casa' 4 tras agrupar,
+# 'Orientación' 8): One-Hot con drop='first' (evita la trampa de la variable ficticia en el
+# modelo lineal) y handle_unknown='infrequent_if_exist' (si test trae una categoría que no
+# apareció en train, no rompe el transform). sparse_output=False para no mezclar una matriz
+# sparse con las columnas de texto/numéricas que pasan sin tocar (remainder='passthrough').
+#
+# 'barrio' (41 niveles, varios con menos de 30 casas): Target Encoding sobre 'clp' (target
+# continuo). TargetEncoder de sklearn hace cross-fitting internamente dentro de fit_transform
+# (K-fold sobre TRAIN, calculando el encoding de cada fila sin ver su propio target) y aplica
+# suavizado hacia la media global automáticamente -- es exactamente el suavizado bayesiano y la
+# CV anidada que describe el PASO 4, sin tener que implementarlos a mano.
+
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, TargetEncoder, StandardScaler
+
+columnas_onehot = ['comuna', 'Tipo de casa', 'Orientación']
+columnas_target_encoding = ['barrio']
+
+encoder_categoricas = ColumnTransformer(
+    transformers=[
+        ('onehot', OneHotEncoder(drop='first', handle_unknown='infrequent_if_exist', sparse_output=False),
+         columnas_onehot),
+        ('target', TargetEncoder(target_type='continuous', random_state=42), columnas_target_encoding),
+    ],
+    remainder='passthrough',
+)
+
+# El resto de las columnas (superficies, conteos, binarios, 'descripcion' como texto crudo)
+# quedan sin tocar en esta etapa -- escalado y vectorización de texto son pasos aparte del PASO 4
+# que todavía no se pidieron, así que X_*_codificado no es todavía el input final del modelo.
+
+X_train_codificado = pd.DataFrame(
+    encoder_categoricas.fit_transform(X_train, y_train),
+    columns=encoder_categoricas.get_feature_names_out(),
+    index=X_train.index,
+)
+X_test_codificado = pd.DataFrame(
+    encoder_categoricas.transform(X_test),
+    columns=encoder_categoricas.get_feature_names_out(),
+    index=X_test.index,
+)
+
+# El array que devuelve el ColumnTransformer mezcla números con el texto crudo de
+# 'remainder__descripcion' en un solo bloque, así que numpy lo tipa todo como dtype=object
+# (incluido 'target__barrio', que es un float pero queda encapsulado en un objeto). Se restaura
+# el dtype numérico columna por columna, dejando 'descripcion' como texto -- si no, cualquier
+# describe()/cálculo posterior sobre las columnas numéricas se rompe silenciosamente.
+
+columnas_numericas_codificadas = [c for c in X_train_codificado.columns if c != 'remainder__descripcion']
+X_train_codificado[columnas_numericas_codificadas] = X_train_codificado[columnas_numericas_codificadas].apply(pd.to_numeric)
+X_test_codificado[columnas_numericas_codificadas] = X_test_codificado[columnas_numericas_codificadas].apply(pd.to_numeric)
+
+print(f'Columnas tras codificar categóricas: {X_train_codificado.shape[1]} (antes: {X_train.shape[1]})')
+
+# =======================================================================================
+# PASO 4c -- ¿VALE LA PENA VECTORIZAR 'descripcion'? VALIDACIÓN ANTES DE IMPLEMENTAR
+# =======================================================================================
+# Antes de invertir en limpiar y vectorizar texto (con su propio riesgo de fuga, ver más abajo),
+# se mide cuánto aporta: se entrena el mismo modelo con y sin el bloque de texto y se compara
+# MdAPE en clp -- en la escala real, no en log, para que el número sea interpretable como
+# porcentaje de error sobre el precio. Se usa HistGradientBoostingRegressor (ya viene con
+# sklearn, no agrega dependencias) porque es invariante a escala: no hace falta esperar a que el
+# escalado numérico (todavía sin implementar, ver PASO 4) esté listo para esta comparación.
+
+from sklearn.ensemble import HistGradientBoostingRegressor
+
+
+def mdape(y_true, y_pred):
+    """Mediana del error porcentual absoluto -- el criterio que PASO 4 ya definía para evaluar
+    en la escala real (CLP), no en log."""
+    return np.median(np.abs((np.asarray(y_true) - y_pred) / np.asarray(y_true))) * 100
+
+
+columnas_sin_texto = [c for c in X_train_codificado.columns if c != 'remainder__descripcion']
+
+modelo_sin_texto = HistGradientBoostingRegressor(random_state=42)
+modelo_sin_texto.fit(X_train_codificado[columnas_sin_texto], np.log(y_train))
+prediccion_sin_texto = np.exp(modelo_sin_texto.predict(X_test_codificado[columnas_sin_texto]))
+mdape_sin_texto = mdape(y_test, prediccion_sin_texto)
+print(f'MdAPE sin texto: {mdape_sin_texto:.2f}%')
+
+# Limpieza de 'descripcion' antes de vectorizar: el texto libre suele mencionar precio o
+# superficie (ej. "terreno de 306 m²", "$457.000", "18.000 UF") -- eso es fuga directa del
+# target, ya que 'clp'/'Superficie total' son justamente lo que se quiere predecir/ya está en el
+# feature set. Se valida contra una muestra real de deptos.json: 200 de 400 descripciones (50%)
+# traen al menos una mención así, y el patrón scrubbea números seguidos de m²/m2/metros/UF/CLP/$
+# sin tocar el resto del texto (algún falso positivo inofensivo, ej. "jardín de 10 metros de
+# fondo", se pierde -- preferible a dejar pasar una fuga real). Además se bajan a minúscula y se
+# sacan tildes (unidecode, ya instalado) porque nltk trae sus stopwords en español sin tildes.
+
+import unidecode
+from nltk.corpus import stopwords
+
+PATRON_PRECIO_SUPERFICIE = re.compile(
+    r'\$\s?\d[\d.,]*'
+    r'|\d[\d.,]*\s?(?:uf|clp|pesos?|millones?|m2|m²|mts2|mts²|metros?)\b',
+    re.IGNORECASE,
+)
+
+
+def limpiar_descripcion(texto: str) -> str:
+    texto = PATRON_PRECIO_SUPERFICIE.sub(' ', str(texto))
+    return unidecode.unidecode(texto).lower()
+
+
+descripcion_train_limpia = X_train['descripcion'].apply(limpiar_descripcion)
+descripcion_test_limpia = X_test['descripcion'].apply(limpiar_descripcion)
+stopwords_es = [unidecode.unidecode(palabra) for palabra in stopwords.words('spanish')]
+
+# TF-IDF + SVD, no embeddings: es la opción más barata (sin dependencias nuevas) y la más
+# proporcional a los ~4.200 documentos de train que hay para ajustarla. min_df/max_df descartan
+# typos/direcciones únicas y el boilerplate de la inmobiliaria que se repite en miles de avisos.
+# Se ajusta (fit) SOLO sobre train, igual que el resto de los encoders del PASO 4b.
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import TruncatedSVD
+
+N_COMPONENTES_SVD = 50
+
+tfidf = TfidfVectorizer(ngram_range=(1, 2), min_df=5, max_df=0.7, stop_words=stopwords_es)
+tfidf_train = tfidf.fit_transform(descripcion_train_limpia)
+tfidf_test = tfidf.transform(descripcion_test_limpia)
+
+svd = TruncatedSVD(n_components=N_COMPONENTES_SVD, random_state=42)
+texto_train = svd.fit_transform(tfidf_train)
+texto_test = svd.transform(tfidf_test)
+
+columnas_texto = [f'texto_svd_{i}' for i in range(N_COMPONENTES_SVD)]
+texto_train_df = pd.DataFrame(texto_train, columns=columnas_texto, index=X_train.index)
+texto_test_df = pd.DataFrame(texto_test, columns=columnas_texto, index=X_test.index)
+
+X_train_con_texto = pd.concat([X_train_codificado[columnas_sin_texto], texto_train_df], axis=1)
+X_test_con_texto = pd.concat([X_test_codificado[columnas_sin_texto], texto_test_df], axis=1)
+
+modelo_con_texto = HistGradientBoostingRegressor(random_state=42)
+modelo_con_texto.fit(X_train_con_texto, np.log(y_train))
+prediccion_con_texto = np.exp(modelo_con_texto.predict(X_test_con_texto))
+mdape_con_texto = mdape(y_test, prediccion_con_texto)
+print(f'MdAPE con texto: {mdape_con_texto:.2f}%')
+print(f'Diferencia: {mdape_sin_texto - mdape_con_texto:.2f} puntos porcentuales '
+      f'({"mejora" if mdape_con_texto < mdape_sin_texto else "empeora"} al agregar texto)')
+
+# CONCLUSIÓN (medida, no supuesta): MdAPE sin texto 8,24% vs. con texto 8,47% -- el bloque de
+# TF-IDF+SVD empeora levemente en vez de mejorar. No se adopta: la señal que 'descripcion'
+# podría aportar (estado, remodelaciones, vista) ya queda cubierta por las features estructurales
+# para este dataset/modelo, o el ruido de 50 componentes SVD sobre ~4.200 documentos le pesa más
+# de lo que aporta. 'descripcion' queda fuera del set de entrenamiento final: los pasos
+# siguientes deben construirse sobre X_train_codificado[columnas_sin_texto] /
+# X_test_codificado[columnas_sin_texto], no sobre X_train_con_texto/X_test_con_texto. Si más
+# adelante se prueba con más datos, otro modelo, u otro número de componentes y cambia el
+# resultado, revisar este bloque en vez de descartarlo -- por ahora la medición dice que no vale
+# la complejidad.
+
+# =======================================================================================
+# PASO 4d -- ESCALADO DE VARIABLES NUMÉRICAS
+# =======================================================================================
+# Se parte de columnas_sin_texto (PASO 4c: 'descripcion' queda afuera, no aportó). El criterio
+# para decidir qué escalar no es "continua vs. discreta", sino la forma de la distribución:
+#
+#   - Superficies y 'Gastos comunes' (skew ~70/~59/~7,4): log1p primero, StandardScaler después.
+#     Estandarizar sin corregir la forma no arregla nada -- solo centra la masa de datos
+#     aplastada contra el extremo, con el outlier igual de dominante a 40 desvíos.
+#   - Conteos discretos ('Dormitorios', 'Baños', 'Estacionamientos', 'Bodegas', 'Cantidad de
+#     pisos'): ya son de rango chico y aproximadamente simétricos (skew < 1,2 en dormitorios y
+#     baños), así que se estandarizan directo, sin log.
+#   - 'Antigüedad': se acota primero a un rango plausible (0-120 años) y luego se estandariza
+#     igual que los conteos. Los 140-371 años que quedan tras la limpieza (ver PASO 2 -- el caso
+#     evidente de 939 ya se anuló ahí) siguen siendo demasiado altos para una casa real, así que
+#     el recorte va acá en vez de descartar esas filas.
+#   - Binarias: no se tocan. Ya están en [0,1], y estandarizarlas rompería la lectura directa del
+#     coeficiente ("tener piscina cambia el precio en X").
+#   - 'latitud'/'longitud': tampoco se escalan -- no se usan crudas, se convertirán en features de
+#     distancia (PASO 4, punto 4, todavía sin implementar).
+#   - Categóricas ya codificadas (PASO 4b: one-hot y 'target__barrio') quedan tal cual -- el
+#     escalado que se pidió acá es solo sobre las numéricas, no sobre lo que ya se codificó.
+#
+# Para el modelo de árboles el escalado es indiferente (invariante a transformaciones monótonas);
+# se aplica igual porque comparte el mismo set de features que el modelo lineal, que sí lo
+# necesita. Los StandardScaler se ajustan SOLO con train, igual que el resto del PASO 4.
+
+columnas_log_scale = ['remainder__Superficie útil', 'remainder__Superficie total', 'remainder__Gastos comunes']
+columnas_solo_scale = ['remainder__Dormitorios', 'remainder__Baños', 'remainder__Estacionamientos',
+                       'remainder__Bodegas', 'remainder__Cantidad de pisos']
+columna_antiguedad = 'remainder__Antigüedad'
+
+X_train_final = X_train_codificado[columnas_sin_texto].copy()
+X_test_final = X_test_codificado[columnas_sin_texto].copy()
+
+escalador_log = StandardScaler()
+X_train_final[columnas_log_scale] = escalador_log.fit_transform(np.log1p(X_train_final[columnas_log_scale]))
+X_test_final[columnas_log_scale] = escalador_log.transform(np.log1p(X_test_final[columnas_log_scale]))
+
+escalador_conteos = StandardScaler()
+X_train_final[columnas_solo_scale] = escalador_conteos.fit_transform(X_train_final[columnas_solo_scale])
+X_test_final[columnas_solo_scale] = escalador_conteos.transform(X_test_final[columnas_solo_scale])
+
+X_train_final[columna_antiguedad] = X_train_final[columna_antiguedad].clip(0, 120)
+X_test_final[columna_antiguedad] = X_test_final[columna_antiguedad].clip(0, 120)
+escalador_antiguedad = StandardScaler()
+X_train_final[[columna_antiguedad]] = escalador_antiguedad.fit_transform(X_train_final[[columna_antiguedad]])
+X_test_final[[columna_antiguedad]] = escalador_antiguedad.transform(X_test_final[[columna_antiguedad]])
+
+print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
+print(X_train_final[columnas_log_scale + columnas_solo_scale + [columna_antiguedad]].describe())
 
