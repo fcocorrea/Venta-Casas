@@ -2360,17 +2360,55 @@ print(f'{CASAS_CANDIDATAS_XLSX}: {len(casas_candidatas)} filas exportadas '
       f'{(casas_candidatas["flag"] == "sobrevalorada").sum()} sobrevaloradas.')
 
 # =======================================================================================
-# PASO 5i -- MAPA (pendiente)
+# PASO 5i -- MAPA
 # =======================================================================================
-# Scatter geográfico coloreado de rojo (precio sobre q95, sobrevalorada) a verde (bajo q05,
-# subvalorada), con gris para todo lo que cae dentro del intervalo -- el gris es la mayoría y tiene
-# que verse como tal, si no el mapa exagera la cantidad de señal disponible.
+# folium (Leaflet.js) sobre plotly: la única necesidad acá es un scatter geográfico con
+# tooltip -- no hace falta la superficie de features de plotly, y folium da un mapa base de calles
+# real (OpenStreetMap) en vez de un scatter plano, que para ubicar CASAS concretas importa. Se
+# agrega como dependencia nueva (no estaba en el venv); instalada con `pip install folium`.
 #
-#   - Las coordenadas ya están completas (99,98%) tras la corrección de PASO 2, así que no hace
-#     falta filtrar filas.
-#   - folium o plotly generan HTML interactivo, no PNG. gráficos/ hoy guarda solo PNG y está
-#     commiteado: decidir si el HTML entra al repo o va a .gitignore.
-#   - Tooltip con url, precio real, predicho e intervalo: sin la url el mapa no es accionable.
+# Coloreado de rojo (sobrevalorada, precio real sobre q95) a verde (subvalorada, precio real bajo
+# q05), gris para todo lo que cae dentro del intervalo -- el gris es la mayoría (91,7% medido en
+# PASO 5e) y tiene que verse como tal: se dibuja con radio chico y opacidad baja para no competir
+# visualmente con los puntos flaggeados, en vez de omitirse (omitirlo exageraría la cantidad de
+# señal disponible, viendo solo casos "interesantes").
+#
+# Se usa `ranking_filtrado` (el set de test completo, no `casas_candidatas` que 5h ya filtró a
+# solo flaggeadas) -- el mapa necesita el gris de fondo para que la proporción se lea bien. Las
+# coordenadas ya están completas (99,98%) tras la corrección de PASO 2, no hace falta filtrar filas.
+# gráficos/ hoy solo guarda PNG y está commiteado -- el HTML se guarda ahí mismo, mismo criterio de
+# "artefacto de una corrida, commiteado y sobreescrito" que ya aplica a los PNG y a los .xlsx.
+
+import folium
+
+MAPA_HTML = os.path.join(GRAFICOS_DIR, 'mapa_intervalos.html')
+COLOR_POR_FLAG = {'dentro_del_intervalo': 'gray', 'subvalorada': 'green', 'sobrevalorada': 'red'}
+
+mapa_datos = ranking_filtrado.join(X_test[['latitud', 'longitud']])
+mapa_datos = mapa_datos.join(deptos_df.loc[mapa_datos.index, ['url']])
+
+mapa = folium.Map(location=[mapa_datos['latitud'].mean(), mapa_datos['longitud'].mean()],
+                   zoom_start=12, tiles='OpenStreetMap')
+
+for _, fila in mapa_datos.iterrows():
+    es_gris = fila['flag'] == 'dentro_del_intervalo'
+    tooltip = (f"<b>{fila['comuna']}</b><br>"
+               f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
+               f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
+               f"Intervalo 90%: [{fila['q05']:,.0f}, {fila['q95']:,.0f}] CLP<br>"
+               f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
+    folium.CircleMarker(
+        location=[fila['latitud'], fila['longitud']],
+        radius=3 if es_gris else 6,
+        color=COLOR_POR_FLAG[fila['flag']],
+        fill=True, fill_opacity=0.25 if es_gris else 0.85,
+        opacity=0.25 if es_gris else 0.85,
+        tooltip=tooltip,
+    ).add_to(mapa)
+
+mapa.save(MAPA_HTML)
+print(f'{MAPA_HTML}: {len(mapa_datos)} casas de test graficadas '
+      f'({(mapa_datos["flag"] != "dentro_del_intervalo").sum()} flaggeadas).')
 
 # =======================================================================================
 # PASO 5j -- LÍMITES: QUÉ NO PUEDE RESPONDER ESTE MODELO
