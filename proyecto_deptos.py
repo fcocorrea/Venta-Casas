@@ -2528,19 +2528,21 @@ for _, fila in mapa_datos.iterrows():
     # conserva en la opacidad (flaggeadas más sólidas). El TAMAÑO ahora es continuo, proporcional
     # a la magnitud del residuo (ver radio_por_magnitud), no binario por flag.
     es_flaggeada = fila['flag'] != 'dentro_del_intervalo'
-    tooltip = (f"<b>{fila['comuna']}</b><br>"
-               f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
-               f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
-               f"Intervalo 90%: [{fila['q05']:,.0f}, {fila['q95']:,.0f}] CLP<br>"
-               f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
-               f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
+    info_html = (f"<b>{fila['comuna']}</b><br>"
+                 f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
+                 f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
+                 f"Intervalo 90%: [{fila['q05']:,.0f}, {fila['q95']:,.0f}] CLP<br>"
+                 f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
+                 f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
     folium.CircleMarker(
         location=[fila['latitud'], fila['longitud']],
         radius=radio_por_magnitud(fila['residuo_pct']),
         color=color_por_residuo(fila['precio_real'], fila['q50']),
         fill=True, fill_opacity=0.75 if es_flaggeada else 0.35,
         opacity=0.85 if es_flaggeada else 0.4,
-        tooltip=tooltip,
+        # popup (click, queda abierta hasta clickear afuera o en otro círculo) en vez de tooltip
+        # (hover, se cierra al mover el mouse) -- a pedido explícito.
+        popup=folium.Popup(info_html, max_width=300),
     ).add_to(mapa)
 
 mapa.save(MAPA_HTML)
@@ -2604,19 +2606,19 @@ mapa_completo = folium.Map(location=[mapa_datos_completo['latitud'].mean(), mapa
 
 for _, fila in mapa_datos_completo.iterrows():
     es_flaggeada = fila['flag'] != 'dentro_del_intervalo'
-    tooltip = (f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
-               f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
-               f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
-               f"Intervalo 90%: [{fila['q05']:,.0f}, {fila['q95']:,.0f}] CLP<br>"
-               f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
-               f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
+    info_html = (f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
+                 f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
+                 f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
+                 f"Intervalo 90%: [{fila['q05']:,.0f}, {fila['q95']:,.0f}] CLP<br>"
+                 f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
+                 f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
     folium.CircleMarker(
         location=[fila['latitud'], fila['longitud']],
         radius=radio_por_magnitud(fila['residuo_pct']),
         color=color_por_residuo(fila['precio_real'], fila['q50']),
         fill=True, fill_opacity=0.55 if es_flaggeada else 0.2,
         opacity=0.6 if es_flaggeada else 0.25,
-        tooltip=tooltip,
+        popup=folium.Popup(info_html, max_width=300),
     ).add_to(mapa_completo)
 
 mapa_completo.save(MAPA_COMPLETO_HTML)
