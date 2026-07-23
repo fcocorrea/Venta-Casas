@@ -23,7 +23,8 @@
 # "precio unitario" se mantiene como feature/diagnóstico para detección de outliers -- tal como ya
 # se usa más abajo -- pero no como variable objetivo.
 #
-# Implementación, en cinco grandes pasos:
+# Implementación, en cinco grandes pasos (numeración alineada 1:1 con los PASO del código: el
+# paso N de acá es PASO N más abajo, sin desfase):
 # 1) Obtención de datos: se extraen vía web scraping con Scrapy (ver deptos_scraper/spiders/deptos.py;
 #    se ejecuta con `scrapy crawl deptos -O deptos.json`, documentado en CLAUDE.md).
 # 2) Limpieza de datos: homologar y transformar los datos, que no vienen expresados de forma
@@ -33,19 +34,23 @@
 #    en PASO 4 -- y ninguna usa precio/clp/precio unitario como predictor, para no filtrar el
 #    target hacia adentro de una feature (ver COLUMNAS_TARGET en la matriz de correlación).
 # 3) Exploración: entender los datos para adaptarlos a un modelo de regresión.
-# 4) Modelos: separar train/test, probar un modelo lineal (log-log, interpretable) y uno de
-#    árboles con boosting (captura interacciones comuna × superficie × amenities), evaluar con
-#    MdAPE/MAE/RMSE en CLP (no solo en escala log) contra un baseline de mediana por barrio, y
-#    quedarnos con el más adecuado.
-# 5) Producción: para cada casa, calcular el residuo (precio real - predicho) / predicho y
-#    ordenar de mayor a menor descuento -- ese ranking reemplaza el filtro fijo actual (precio UF
-#    < 15000, Dormitorios >= 3, etc.), que no se ajusta por comuna ni superficie. Las
-#    restricciones del comprador (dormitorios, baños, cercanía) se aplican como filtro sobre el
-#    ranking, no como criterio principal de selección. El resultado se ubica en un mapa,
-#    coloreado de rojo (residuo positivo, sobrevalorada) a verde (residuo negativo, subvalorada).
+# 4) Preprocesamiento: selección de columnas, codificación de categóricas, escalado numérico,
+#    features de distancia/densidad/ratios, colinealidad (VIF, sin PCA) y selección final por
+#    importancia de permutación. Deja armados X_train_final/X_test_final -- el input ya listo
+#    para cualquier modelo, sin entrenar todavía ninguno de producción.
+# 5) Modelamiento y producción: validación cruzada repetida, modelo lineal log-log (interpretable)
+#    y uno de árboles con boosting (captura interacciones comuna × superficie × amenities),
+#    evaluados con MdAPE/MAE/RMSE en CLP (no solo en escala log) contra el baseline de mediana por
+#    barrio. Con el modelo elegido: intervalos de predicción, residuo (precio real - predicho) /
+#    predicho, y ranking por distancia al borde del intervalo -- no por residuo crudo, y no contra
+#    un umbral fijo -- que reemplaza el filtro original (precio UF < 15000, Dormitorios >= 3, etc.).
+#    Las restricciones del comprador (dormitorios, baños, cercanía) se aplican como filtro sobre el
+#    ranking, no como criterio principal. El resultado se ubica en un mapa, coloreado de rojo
+#    (sobre el intervalo, sobrevalorada) a verde (bajo el intervalo, subvalorada).
 
 import os
 import re
+from dataclasses import dataclass, field
 
 import pandas as pd
 import numpy as np
@@ -414,340 +419,17 @@ indice_train, indice_test = train_test_split(
 print(f'Split previo a la limpieza que aprende -> train: {len(indice_train)} filas. '
       f'test: {len(indice_test)} filas.')
 
-# Imputación de comuna (aprende de los datos -> ajustada SOLO con train):
-# - comuna nula y barrio conocido: si en train ese barrio identifica una comuna, se usa la más
-#   frecuente de train.
-# - comuna nula y el "barrio" es en realidad el nombre de una comuna (el artefacto de la ruta de
-#   navegación descrito arriba): se promueve barrio -> comuna y el barrio queda nulo.
-# - lo que no resuelva ninguna de las dos reglas queda nulo y lo toma el vecino más cercano.
-# Un barrio que solo aparece en test no está en el mapeo y cae al vecino más cercano, que es el
-# comportamiento correcto: train no tiene nada que decir sobre él.
-
-barrios_train = deptos_df.loc[indice_train].dropna(subset=['barrio', 'comuna'])
-barrio_a_comuna = barrios_train.groupby('barrio')['comuna'].agg(lambda s: s.value_counts().idxmax())
-comunas_validas = set(deptos_df.loc[indice_train, 'comuna'].dropna().unique())
-
-comuna_nula = deptos_df['comuna'].isna()
-desde_barrio = comuna_nula & deptos_df['barrio'].isin(barrio_a_comuna.index)
-deptos_df.loc[desde_barrio, 'comuna'] = deptos_df.loc[desde_barrio, 'barrio'].map(barrio_a_comuna)
-
-barrio_es_comuna = deptos_df['comuna'].isna() & deptos_df['barrio'].isin(comunas_validas)
-deptos_df.loc[barrio_es_comuna, 'comuna'] = deptos_df.loc[barrio_es_comuna, 'barrio']
-deptos_df.loc[barrio_es_comuna, 'barrio'] = np.nan
-
-print(f'Comunas imputadas desde el barrio: {desde_barrio.sum()}. '
-      f'Barrios que eran nombre de comuna: {barrio_es_comuna.sum()}.')
-print(f'Quedan {deptos_df.comuna.isna().sum()} comunas nulas para el vecino más cercano.')
-
-# Para los registros donde comuna y/o barrio siguen nulos, se imputan con el valor de la casa
-# conocida más cercana en latitud/longitud -- más preciso que fuzzy-matching de texto sobre
-# 'dirección' (que además viene vacía en el crawl actual de casas) y aprovecha que casi todas las
-# filas sí tienen coordenadas (ver deptos.json: solo 1 de 5603 sin latitud/longitud).
+# Snapshot post-PASO 2 (filtrado/deduplicado), pre-imputación: PASO 5a (más abajo) reutiliza esta
+# copia para reajustar TODA la imputación de este bloque con los índices de train de cada fold de
+# validación cruzada, en vez de reusar los parámetros ajustados para este split fijo 80/20.
+deptos_df_limpio = deptos_df.copy()
 
 from scipy.spatial import cKDTree
-
-
-def impute_nearest_by_location(df: pd.DataFrame, column: str) -> None:
-    """El árbol de vecinos se construye SOLO con filas de train (`indice_train`): son las únicas
-    que pueden "enseñar" un valor. Las filas a completar son de ambos folds -- a una fila de test
-    se le puede asignar la comuna de su vecino de train, pero nunca la de otro vecino de test."""
-    has_coords = df['latitud'].notna() & df['longitud'].notna()
-    known = df.loc[df.index.isin(indice_train) & df[column].notna() & has_coords]
-    missing = df.loc[df[column].isna() & has_coords]
-    if known.empty or missing.empty:
-        return
-    # ponytail: distancia euclidiana en grados, no haversine -- a la escala de Santiago (unas
-    # decenas de km) el orden de vecino-más-cercano no cambia; pasar a haversine solo si se
-    # necesitan distancias reales en algún otro cálculo.
-    tree = cKDTree(known[['latitud', 'longitud']].to_numpy())
-    _, nearest_idx = tree.query(missing[['latitud', 'longitud']].to_numpy())
-    df.loc[missing.index, column] = known[column].to_numpy()[nearest_idx]
-
-
-impute_nearest_by_location(deptos_df, 'comuna')
-print(f'Ahora hay {deptos_df.comuna.isna().sum()} comunas con valores nulos')
-
-# Barrios:
-# mismo problema que con las comunas. Un mismo barrio puede aparecer escrito de formas distintas
-# (ej. "las condes" vs "Las Condes"), así que se capitalizan todos.
-
-deptos_df.barrio = deptos_df.barrio.str.title()
-print(f'Hay {deptos_df.barrio.isna().sum()} casas sin barrio.')
-
-impute_nearest_by_location(deptos_df, 'barrio')
-print(f'Ahora hay {deptos_df.barrio.isna().sum()} casas sin barrio.')
-
-# Rangos de valores:
-# revisamos qué atributos tienen valores inverosímiles (mal tipeados o sin sentido) y los
-# corregimos.
-
-summary = deptos_df.describe()
-print(summary)
-
-# Último cuartil:
-# en las filas 75% y max, si la diferencia entre ambas es enorme para un atributo numérico, suele
-# ser un error de tipeo o de contexto. Por ejemplo, en "Antigüedad" el cuantil 75% son ~20 años,
-# pero el máximo puede ser un año como 2013: imposible como antigüedad, pero tiene sentido si en
-# realidad es el año de construcción.
-
 from datetime import datetime
-
-year = datetime.now().year
-deptos_df['Antigüedad'] = np.where(deptos_df['Antigüedad'] >= 1800, year - deptos_df['Antigüedad'], deptos_df['Antigüedad'])
-
-# Con la antigüedad corregida, valores sobre 1.000 años restantes o negativos no tienen sentido
-# (ambos aparecen en el scrape: años mal tipeados y algún valor negativo corrupto): se dejan nulos.
-
-deptos_df['Antigüedad'] = np.where((deptos_df['Antigüedad'] > 1000) | (deptos_df['Antigüedad'] < 0),
-                                    np.nan, deptos_df['Antigüedad'])
-
-# El mismo tipo de revisión aplica a otros atributos discretos propios de una casa (a diferencia
-# de un departamento, no hay "número de piso de la unidad" ni "departamentos por piso"; en cambio
-# "Cantidad de pisos" puede tener el mismo tipo de error de tipeo, ej. 2013 en vez de 2). Se
-# incluye también 'Antigüedad' acá: el filtro de arriba (>1.000 o <0) no descarta el caso de 939
-# años, que sigue siendo un error de tipeo evidente para una casa en estas comunas -- el mismo
-# corte por salto relativo que ya se usa para las demás lo anula sin tener que hardcodear "939".
-
-bad_ranges = [c for c in ['Baños', 'Estacionamientos', 'Bodegas', 'Cantidad de pisos', 'Antigüedad'] if c in deptos_df.columns]
-
-# El umbral de corte se lee del top-20 de TRAIN, no del dataset completo: es un parámetro estimado
-# a partir de la distribución (dónde está el salto que delata el error de tipeo), y estimarlo con
-# test adentro sería dejar que test defina su propio criterio de limpieza. Una vez fijado con
-# train, se aplica a ambos folds -- un valor imposible en test se anula igual, pero según el
-# umbral que train consideró imposible.
-
-for column in bad_ranges:
-    top_20 = deptos_df.loc[indice_train, column].dropna().nlargest(20).sort_values()
-    cut_value = cut_after_relative_jump(top_20, threshold=1.0)
-    if cut_value is not None:
-        idx = deptos_df[deptos_df[column] >= cut_value].index
-        print(f'Asignamos a nan {len(idx)} valores de la columna "{column}" (>= {cut_value})')
-        deptos_df.loc[idx, column] = np.nan
-
-# Valores negativos o ceros:
-# no tiene sentido que una casa tenga 0 baños o dormitorios, ni que ningún atributo de conteo sea
-# negativo. Se exceptúan bodegas, estacionamientos y antigüedad, donde 0 es válido (una casa puede
-# no tener bodega/estacionamiento, o ser recién construida). Como no se puede saber el valor real,
-# se dejan como nulos para imputar después.
-#
-# latitud/longitud quedan fuera de esta regla: en Santiago ambas son negativas por definición
-# (hemisferio sur/oeste), así que "negativo" no es un error para ellas -- ya se corrigió el único
-# caso real (signo invertido) más arriba, antes de las imputaciones por vecino más cercano.
-
-coordenadas = {'latitud', 'longitud'}
-zero_ok_columns = {'Bodegas', 'Estacionamientos', 'Antigüedad'}
-for column in summary.columns:
-    if not pd.api.types.is_numeric_dtype(deptos_df[column]) or column in coordenadas:
-        continue
-    invalid = deptos_df[column] < 0
-    if column not in zero_ok_columns:
-        invalid |= deptos_df[column] == 0
-    if invalid.any():
-        print(f'Anulamos {invalid.sum()} valores inválidos en "{column}"')
-        deptos_df.loc[invalid, column] = np.nan
-
-# Valores Nulos:
-# al ser datos anotados manualmente por cada vendedor, es normal tener muchos valores nulos,
-# especialmente en los atributos categóricos de las tablas de cada publicación.
-
-total_observations = len(deptos_df)
-na_values = deptos_df.isnull().sum()
-percent_na = ((na_values / total_observations) * 100).round(2)
-na_summary = pd.concat([na_values, percent_na], axis=1)
-na_summary.columns = ['Cantidad de Nulos', 'Porcentaje de Nulos']
-na_summary = na_summary[na_summary['Cantidad de Nulos'] > 0]
-na_summary.sort_values('Cantidad de Nulos', ascending=False, inplace=True)
-print(na_summary)
 
 import seaborn as sns
 
-sns.set(style='whitegrid')
-plt.figure(figsize=(16, 8))
-sns.set(font_scale=.75)
-ax = sns.barplot(x='Porcentaje de Nulos', y=na_summary.index, data=na_summary)
-plt.title('Número de valores nulos por variable')
-plt.xlabel('Porcentaje valores nulos')
-plt.ylabel('Atributos')
-ax.set_xlim(0, 100)
-plt.savefig(os.path.join(GRAFICOS_DIR, 'valores_nulos_por_variable.png'))
-
-
-# Imputación de valores nulos en variables categóricas binarias:
-# el scrape solo marca un amenity cuando la casa lo tiene ('Sí'); un nulo no significa "desconocido",
-# significa que el vendedor no lo marcó porque la casa no lo tiene. Por eso no hay nada que predecir
-# con un modelo: 'Sí' -> 1, cualquier otro valor (incluido nulo) -> 0.
-
-for binary_feature in binary_features:
-    deptos_df[binary_feature] = (deptos_df[binary_feature] == 'Sí').astype(int)
-
-
-def columns_with_missing_values() -> pd.DataFrame:
-    null_values = {column: deptos_df[column].isna().sum()
-                   for column in deptos_df.columns
-                   if deptos_df[column].isna().sum() > 0}
-    null_values = pd.DataFrame(list(null_values.items()), columns=['Atributo', 'Valores Nulos'])
-    null_values = null_values.set_index('Atributo').sort_values('Valores Nulos')
-    null_values['Tipo de Dato'] = [deptos_df[column].dtype for column in null_values.index]
-    return null_values
-
-
-print(columns_with_missing_values())
-
-# Relación entre atributos con datos faltantes:
-# se revisa la correlación entre los atributos numéricos para poder imputar un atributo nulo a
-# partir de otro con alta correlación. numeric_only=True evita que .corr() falle o descarte
-# columnas de texto (comuna, barrio, dirección, titulo, url) de forma implícita.
-#
-# Un atributo sin varianza (ej. un amenity que, tras la imputación, quedó con el mismo valor en
-# todas las filas -- Amoblado solo trae 'Sí' en todo el scrape) no tiene correlación definida con
-# nada: la fórmula de Pearson queda 0/0 (NaN) para toda su fila y columna. Se descartan esos
-# atributos del heatmap y de la búsqueda de matches para imputar, en vez de mostrarlos en blanco.
-
-corr = deptos_df.corr(numeric_only=True)
-corr = corr.dropna(axis=0, how='all').dropna(axis=1, how='all')
-plt.figure(figsize=(12, 10))
-sns.heatmap(corr, cmap="Blues", annot=True)
-plt.savefig(os.path.join(GRAFICOS_DIR, 'correlacion_atributos.png'))
-
-# El heatmap SÍ debe mostrar el bloque de target ('precio', 'clp', 'precio unitario'): entender
-# qué atributo correlaciona con el precio es justamente el objetivo del análisis exploratorio.
-#
-# La búsqueda de matches para IMPUTAR, en cambio, no puede verlo. Si un atributo nulo se rellena
-# a partir del precio, ese atributo deja de ser una característica de la casa y pasa a ser una
-# función del target: el modelo lo "usa para predecir" un precio que ya está adentro de la
-# feature. Es la regla que declara la cabecera de este archivo ("ninguna [imputación] debe usar
-# precio/clp/precio unitario como predictor"), y sin este filtro el código la incumplía --
-# medido: 'Estacionamientos' tenía 'clp' como su match de mayor correlación y 20 de sus filas se
-# imputaban directamente desde el precio, más 19 de 'Dormitorios'.
-
-# Además, la matriz que guía la imputación se calcula SOLO con train: qué atributo correlaciona
-# con cuál es un parámetro aprendido de los datos, igual que una media o una moda. El heatmap de
-# arriba sí usa el dataset completo -- es material descriptivo del mercado, no alimenta ninguna
-# decisión del modelo.
-
 COLUMNAS_TARGET = ['precio', 'clp', 'precio unitario']
-
-corr_sin_target = (deptos_df.loc[indice_train]
-                   .drop(columns=COLUMNAS_TARGET, errors='ignore')
-                   .corr(numeric_only=True)
-                   .dropna(axis=0, how='all').dropna(axis=1, how='all'))
-
-
-# Imputación en variables discretas:
-# variables numéricas que toman un número finito de valores, propias de una casa (a diferencia del
-# departamento no hay "número de piso de la unidad" ni "departamentos por piso").
-
-discrete_values = [c for c in ['Dormitorios', 'Baños', 'Estacionamientos', 'Bodegas',
-                                'Cantidad de pisos', 'Antigüedad'] if c in deptos_df.columns]
-na_columns = columns_with_missing_values()
-print(na_columns[na_columns.index.isin(discrete_values)])
-
-
-def attribute_correlations(attribute) -> pd.Index:
-    """Atributos ordenados de mayor a menor correlación (absoluta) respecto a `attribute`, sobre
-    la matriz SIN el bloque de target -- ver COLUMNAS_TARGET más arriba."""
-    columna = corr_sin_target[attribute]
-    return columna[columna.index != attribute].sort_values(ascending=False, key=lambda x: abs(x)).index
-
-
-# Las tres funciones de abajo estiman su regla de imputación (tabla cruzada, medianas por grupo,
-# moda) SOLO con las filas de `indice_train`, y la aplican a las filas pendientes de ambos folds.
-# Es el mismo contrato que un transformer de sklearn: fit(train), transform(todo).
-
-def impute_from_discrete_match(attribute: str, match_attribute: str, pending_index: pd.Index) -> pd.Index:
-    """Imputa vía la combinación más frecuente en una tabla cruzada con `match_attribute`
-    (ej. si 2 dormitorios se combina más seguido con 2 baños, un baño nulo con 2 dormitorios se
-    imputa como 2). La tabla cruzada se arma con train. Devuelve los índices sin resolver."""
-    train_df = deptos_df.loc[indice_train]
-    cross_table = pd.crosstab(train_df[match_attribute], train_df[attribute])
-    if cross_table.empty:
-        return pending_index
-    modes = cross_table.idxmax(axis=1)
-    match_values = deptos_df.loc[pending_index, match_attribute]
-    resolvable = match_values[match_values.isin(modes.index)]
-    deptos_df.loc[resolvable.index, attribute] = resolvable.map(modes)
-    return pending_index.difference(resolvable.index)
-
-
-def impute_from_continuous_match(attribute: str, match_attribute: str, pending_index: pd.Index) -> pd.Index:
-    """Agrupa los valores discretos por la mediana de `match_attribute` (que sí es continuo) y
-    asigna el grupo cuya mediana esté más cerca. Las medianas por grupo se calculan con train.
-    Devuelve los índices que siguen sin resolver."""
-    grouped_medians = deptos_df.loc[indice_train].groupby(attribute)[match_attribute].median().dropna()
-    if grouped_medians.empty:
-        return pending_index
-    match_values = deptos_df.loc[pending_index, match_attribute].dropna()
-    nearest = match_values.apply(lambda v: (grouped_medians - v).abs().idxmin())
-    deptos_df.loc[nearest.index, attribute] = nearest
-    return pending_index.difference(nearest.index)
-
-
-def allocate_values():
-    """Para cada atributo discreto con nulos, prueba sus atributos mejor correlacionados en
-    orden (tabla cruzada si el match es discreto, agrupación por mediana si es continuo). Si
-    ningún match resuelve una fila, se imputa la moda del atributo."""
-    for attribute in discrete_values:
-        pending_index = deptos_df[deptos_df[attribute].isna()].index
-        if pending_index.empty:
-            continue
-        for match_attribute in attribute_correlations(attribute):
-            if pending_index.empty:
-                break
-            if match_attribute in discrete_values:
-                pending_index = impute_from_discrete_match(attribute, match_attribute, pending_index)
-            else:
-                pending_index = impute_from_continuous_match(attribute, match_attribute, pending_index)
-        if not pending_index.empty:
-            mode = deptos_df.loc[indice_train, attribute].mode()
-            if not mode.empty:
-                deptos_df.loc[pending_index, attribute] = mode.iloc[0]
-        print(f'{attribute}: {deptos_df[attribute].isna().sum()} nulos restantes')
-
-
-allocate_values()
-
-# Imputación en variables continuas:
-# Superficie total y Superficie útil ya quedaron sin nulos más arriba (fill cruzado entre ambas +
-# descarte de las filas que no traían ninguna de las dos). Verificando qué float64 sigue con nulos
-# a esta altura, el único caso real es "Unidades totales" (99.8% nulo, 12 de 5.603 filas).
-#
-# No es una columna "difícil de imputar", es una columna que no aplica a casi ninguna fila: esas 12
-# filas son publicaciones de PROYECTOS inmobiliarios completos (mismas filas con 'Tipo de casa' y
-# 'En condominio cerrado' nulos, ficha de página distinta a una casa individual -- ver el fix del
-# selector de dirección), no casas individuales. "Unidades totales" describe al proyecto, no a una
-# casa, así que no existe un valor real que imputarle a las 5.584 casas restantes: ni 0 ni la
-# mediana serían ciertos, el atributo simplemente no les corresponde. Imputarlo sería inventar un
-# número para reducir el conteo de nulos, no describir mejor los datos. Se descarta la columna.
-
-unidades_totales_pct_null = deptos_df['Unidades totales'].isna().mean() * 100
-print(f'"Unidades totales": {unidades_totales_pct_null:.1f}% nulo (solo aplica a fichas de proyecto, '
-      f'no a casas individuales). No es imputable de forma confiable: se descarta la columna.')
-deptos_df = deptos_df.drop(columns=['Unidades totales'])
-
-# Resto de los atributos de texto que seguían con nulos:
-# - dirección: 100% nula (el selector del scraper no la puebla para casas -- ya corregido en el
-#   spider, pero este JSON es de antes del fix). No aporta nada al dataset: se descarta.
-# - Gastos comunes: llega como texto ("290.000 CLP", "0 CLP"), se parsea con la misma
-#   parse_measurement() del resto de las columnas de medición. El nulo se trata como "sin gasto
-#   común informado", es decir 0 -- razonable en casas (a diferencia de un departamento, la mayoría
-#   no paga gasto común de edificio).
-# - Tipo de casa: nulo en las mismas 12 fichas de proyecto sin 'Unidades totales'; siguen siendo
-#   casas, se etiquetan como 'Casa' (la categoría más común y no hay una mejor para esas fichas).
-# - descripcion: nula quiere decir que el vendedor no escribió texto libre, no que no haya nada
-#   que decir de la casa -- se rellena con 'titulo' (siempre presente), que es la mejor
-#   aproximación textual disponible.
-
-deptos_df = deptos_df.drop(columns=['dirección'])
-deptos_df['Gastos comunes'] = deptos_df['Gastos comunes'].apply(parse_measurement).fillna(0)
-deptos_df['Tipo de casa'] = deptos_df['Tipo de casa'].fillna('Casa')
-deptos_df['descripcion'] = deptos_df['descripcion'].fillna(deptos_df['titulo'])
-
-# Orientación: casas en la misma cuadra (misma calle, lote vecino) casi siempre comparten
-# orientación -- se prioriza imputar desde la casa conocida más cercana en línea recta, y solo si
-# esa distancia real es chica (calle/cuadra, no "mismo barrio en general"). Para eso hace falta la
-# distancia real en metros (a diferencia de comuna/barrio, donde solo importaba el orden del
-# vecino más cercano), así que aquí sí se usa haversine en vez de distancia euclidiana en grados.
-
 ORIENTACION_VECINO_MAX_M = 150  # ponytail: umbral fijo (~una cuadra corta); ajustar si el sector tiene lotes más grandes
 
 
@@ -761,46 +443,363 @@ def haversine_m(lat1, lon1, lat2, lon2):
     return 2 * radio_tierra_m * np.arcsin(np.sqrt(a))
 
 
-def impute_orientacion_by_nearest_neighbor(df: pd.DataFrame, column: str, max_distance_m: float) -> None:
-    """Imputa `column` con el valor de la casa conocida más cercana, solo si esa casa está a menos
-    de `max_distance_m`. Deja sin imputar (NaN) los casos sin un vecino lo bastante cerca, para que
-    el fallback de moda por barrio los resuelva."""
+def _nulificar_antiguedad_atipica(df: pd.DataFrame) -> None:
+    """Año de construcción -> antigüedad (cuantil 75% ~20 años, pero el máximo puede ser un año
+    como 2013), y descarte de valores imposibles (>1.000 años restantes o negativos). Regla
+    determinista y universal -- no depende de qué filas son train, así que corre igual dentro del
+    ajuste sobre train (para que bad_ranges/corr_sin_target vean el dato ya corregido, igual que en
+    el código original) y sobre cualquier dataframe en aplicar_imputacion(). Muta `df` in-place."""
+    year = datetime.now().year
+    df['Antigüedad'] = np.where(df['Antigüedad'] >= 1800, year - df['Antigüedad'], df['Antigüedad'])
+    df['Antigüedad'] = np.where((df['Antigüedad'] > 1000) | (df['Antigüedad'] < 0), np.nan, df['Antigüedad'])
+
+
+def _nulificar_negativos_y_ceros(df: pd.DataFrame) -> None:
+    """Ningún atributo de conteo puede ser negativo, y ninguno salvo `zero_ok_columns` puede ser
+    cero -- salvo latitud/longitud, negativas por definición en Santiago. Regla determinista y
+    universal, mismo motivo que _nulificar_antiguedad_atipica. Muta `df` in-place."""
+    coordenadas = {'latitud', 'longitud'}
+    zero_ok_columns = {'Bodegas', 'Estacionamientos', 'Antigüedad'}
+    for column in df.columns:
+        if not pd.api.types.is_numeric_dtype(df[column]) or column in coordenadas:
+            continue
+        invalid = df[column] < 0
+        if column not in zero_ok_columns:
+            invalid |= df[column] == 0
+        if invalid.any():
+            df.loc[invalid, column] = np.nan
+
+
+def _binarizar_amenities(df: pd.DataFrame) -> None:
+    """'Sí' -> 1, cualquier otro valor (incluido nulo) -> 0, para las columnas de amenities
+    (`binary_features`, calculado en PASO 2 sobre el dataframe crudo -- ver más arriba). Regla
+    determinista y universal: no depende de train, pero tiene que correr ANTES de calcular
+    `corr_sin_target`, que necesita estas columnas ya numéricas. Muta `df` in-place."""
+    for binary_feature in binary_features.columns:
+        df[binary_feature] = (df[binary_feature] == 'Sí').astype(int)
+
+
+@dataclass
+class AllocateRule:
+    """Una regla congelada de allocate_values(): probar `match_attribute` para resolver nulos de
+    un atributo discreto. 'discrete': `mapping` es la moda de una tabla cruzada (valor de
+    match_attribute -> valor imputado). 'continuous': `mapping` son las medianas agrupadas (valor
+    del atributo -> mediana de match_attribute), y se imputa el grupo cuya mediana esté más cerca
+    del match_attribute de la fila pendiente."""
+    match_attribute: str
+    kind: str
+    mapping: pd.Series
+
+
+@dataclass
+class ImputacionParams:
+    """Todo lo que PASO 2b aprende de `indice_train`. Los cKDTree exponen sus puntos de fit en
+    `.data`, así que no hace falta guardar coordenadas de los vecinos conocidos por separado --
+    solo el árbol y el array de valores conocidos, alineado al mismo orden que `.data`."""
+    barrio_a_comuna: pd.Series
+    comunas_validas: set
+    tree_comuna: object
+    valores_comuna: np.ndarray
+    tree_barrio: object
+    valores_barrio: np.ndarray
+    bad_range_cuts: dict
+    allocate_rules: dict = field(default_factory=dict)
+    allocate_modo_fallback: dict = field(default_factory=dict)
+    tree_orientacion: object = None
+    valores_orientacion: np.ndarray = None
+    moda_orientacion_por_barrio: pd.Series = None
+    moda_orientacion_global: object = None
+
+
+def _fit_kdtree_conocido(df: pd.DataFrame, column: str):
+    """cKDTree fit con las filas de `df` que ya tienen `column` y coordenadas conocidas. Devuelve
+    (árbol, valores) o (None, None) si no hay filas conocidas."""
     has_coords = df['latitud'].notna() & df['longitud'].notna()
-    known = df.loc[df.index.isin(indice_train) & df[column].notna() & has_coords]
-    missing = df.loc[df[column].isna() & has_coords]
-    if known.empty or missing.empty:
-        return
+    known = df.loc[df[column].notna() & has_coords]
+    if known.empty:
+        return None, None
     tree = cKDTree(known[['latitud', 'longitud']].to_numpy())
+    return tree, known[column].to_numpy()
+
+
+def _aplicar_kdtree_conocido(df: pd.DataFrame, column: str, tree, valores) -> None:
+    """Imputa `column` en `df` con el valor del vecino conocido más cercano (distancia euclidiana
+    en grados -- a la escala de Santiago el orden de vecino-más-cercano no cambia). Sin filtro de
+    distancia máxima, a diferencia de la imputación de Orientación más abajo. Muta `df` in-place."""
+    if tree is None:
+        return
+    has_coords = df['latitud'].notna() & df['longitud'].notna()
+    missing = df.loc[df[column].isna() & has_coords]
+    if missing.empty:
+        return
     _, nearest_idx = tree.query(missing[['latitud', 'longitud']].to_numpy())
-    nearest = known.iloc[nearest_idx]
-    distance_m = haversine_m(missing['latitud'].to_numpy(), missing['longitud'].to_numpy(),
-                              nearest['latitud'].to_numpy(), nearest['longitud'].to_numpy())
-    close_enough = distance_m <= max_distance_m
-    df.loc[missing.index[close_enough], column] = nearest[column].to_numpy()[close_enough]
+    df.loc[missing.index, column] = valores[nearest_idx]
 
 
-impute_orientacion_by_nearest_neighbor(deptos_df, 'Orientación', ORIENTACION_VECINO_MAX_M)
-print(f'Orientación: {deptos_df["Orientación"].isna().sum()} nulos restantes tras imputar por vecino cercano.')
+def ajustar_imputacion(df: pd.DataFrame, indice_train: pd.Index, verbose: bool = True) -> ImputacionParams:
+    """Aprende TODOS los parámetros de la imputación de PASO 2b usando solo `indice_train`. Corre
+    la secuencia sobre una copia aislada de esas filas (`train`) -- el resultado sobre filas de
+    train es idéntico al del código original (cada paso ya filtraba "conocido" a indice_train), y
+    de paso deja fijo cada parámetro aprendido para poder reproducirlo en aplicar_imputacion()
+    sobre cualquier dataframe (el fold completo train+val, o el dataset entero en la corrida
+    única). Los pasos deterministas que ocurren DESPUÉS de allocate_values() en el código original
+    (drop de 'Unidades totales'/'dirección', fills de 'Gastos comunes'/'Tipo de casa'/
+    'descripcion') no afectan ningún parámetro aprendido más abajo (Orientación no los usa), así
+    que no hace falta replicarlos acá -- solo en aplicar_imputacion(), donde sí producen el
+    dataframe final."""
+    # Boolean mask, no fancy-indexing por `indice_train`: .loc[lista] reordena las filas según el
+    # orden de la lista (que train_test_split entrega barajado), mientras que el máscara booleana
+    # preserva el orden original de `df`. Importa para reproducibilidad bit-a-bit: los cKDTree de
+    # más abajo indexan sus puntos por posición, y con coordenadas duplicadas/casi-duplicadas
+    # (ver "casi duplicados" de PASO 2) un desempate por índice interno distinto puede asignar un
+    # vecino distinto aunque el CONJUNTO de puntos conocidos sea idéntico.
+    train = df.loc[df.index.isin(indice_train)].copy()
 
-# Orientación (fallback): la moda cambia bastante de un barrio a otro (la orientación "buena"
-# depende de cómo está trazada la calle), así que para lo que el vecino cercano no resolvió,
-# imputar con la moda del barrio es más certero que la moda global. Los 41 barrios del dataset
-# tienen al menos una Orientación conocida, así que esto resuelve casi todo; las filas que además
-# no tienen barrio caen a la moda global como último recurso.
+    barrios_conocidos = train.dropna(subset=['barrio', 'comuna'])
+    barrio_a_comuna = barrios_conocidos.groupby('barrio')['comuna'].agg(lambda s: s.value_counts().idxmax())
+    comunas_validas = set(train['comuna'].dropna().unique())
 
-moda_por_barrio = (deptos_df.loc[indice_train]
-                   .groupby('barrio')['Orientación']
-                   .agg(lambda s: s.mode().iat[0] if not s.mode().empty else np.nan))
-orientacion_na = deptos_df['Orientación'].isna()
-deptos_df.loc[orientacion_na, 'Orientación'] = deptos_df.loc[orientacion_na, 'barrio'].map(moda_por_barrio)
+    comuna_nula = train['comuna'].isna()
+    desde_barrio = comuna_nula & train['barrio'].isin(barrio_a_comuna.index)
+    train.loc[desde_barrio, 'comuna'] = train.loc[desde_barrio, 'barrio'].map(barrio_a_comuna)
+    barrio_es_comuna = train['comuna'].isna() & train['barrio'].isin(comunas_validas)
+    train.loc[barrio_es_comuna, 'comuna'] = train.loc[barrio_es_comuna, 'barrio']
+    train.loc[barrio_es_comuna, 'barrio'] = np.nan
+    if verbose:
+        print(f'[ajustar_imputacion] Comunas imputadas desde el barrio (train): {desde_barrio.sum()}. '
+              f'Barrios que eran nombre de comuna: {barrio_es_comuna.sum()}.')
 
-orientacion_na = deptos_df['Orientación'].isna()
-if orientacion_na.any():
-    moda_global = deptos_df.loc[indice_train, 'Orientación'].mode().iat[0]
-    print(f'{orientacion_na.sum()} casas sin barrio ni Orientación: se imputan con la moda global ({moda_global}).')
-    deptos_df.loc[orientacion_na, 'Orientación'] = moda_global
+    tree_comuna, valores_comuna = _fit_kdtree_conocido(train, 'comuna')
+    _aplicar_kdtree_conocido(train, 'comuna', tree_comuna, valores_comuna)
 
-print(f'Orientación: {deptos_df["Orientación"].isna().sum()} nulos restantes')
+    train['barrio'] = train['barrio'].str.title()
+    tree_barrio, valores_barrio = _fit_kdtree_conocido(train, 'barrio')
+    _aplicar_kdtree_conocido(train, 'barrio', tree_barrio, valores_barrio)
+
+    _nulificar_antiguedad_atipica(train)
+
+    bad_ranges = [c for c in ['Baños', 'Estacionamientos', 'Bodegas', 'Cantidad de pisos', 'Antigüedad']
+                  if c in train.columns]
+    bad_range_cuts = {}
+    for column in bad_ranges:
+        top_20 = train[column].dropna().nlargest(20).sort_values()
+        cut_value = cut_after_relative_jump(top_20, threshold=1.0)
+        if cut_value is not None:
+            bad_range_cuts[column] = cut_value
+            train.loc[train[column] >= cut_value, column] = np.nan
+
+    _nulificar_negativos_y_ceros(train)
+    _binarizar_amenities(train)
+
+    corr_sin_target = (train.drop(columns=COLUMNAS_TARGET, errors='ignore')
+                       .corr(numeric_only=True)
+                       .dropna(axis=0, how='all').dropna(axis=1, how='all'))
+
+    def _atributos_correlacionados(attribute):
+        columna = corr_sin_target[attribute]
+        return columna[columna.index != attribute].sort_values(ascending=False, key=lambda x: abs(x)).index
+
+    discrete_values = [c for c in ['Dormitorios', 'Baños', 'Estacionamientos', 'Bodegas',
+                                     'Cantidad de pisos', 'Antigüedad'] if c in train.columns]
+    allocate_rules = {}
+    allocate_modo_fallback = {}
+    for attribute in discrete_values:
+        reglas_atributo = []
+        pending_index = train[train[attribute].isna()].index
+        for match_attribute in _atributos_correlacionados(attribute):
+            if pending_index.empty:
+                break
+            if match_attribute in discrete_values:
+                cross_table = pd.crosstab(train[match_attribute], train[attribute])
+                if cross_table.empty:
+                    continue
+                modes = cross_table.idxmax(axis=1)
+                match_values = train.loc[pending_index, match_attribute]
+                resolvable = match_values[match_values.isin(modes.index)]
+                train.loc[resolvable.index, attribute] = resolvable.map(modes)
+                pending_index = pending_index.difference(resolvable.index)
+                reglas_atributo.append(AllocateRule(match_attribute, 'discrete', modes))
+            else:
+                grouped_medians = train.groupby(attribute)[match_attribute].median().dropna()
+                if grouped_medians.empty:
+                    continue
+                match_values = train.loc[pending_index, match_attribute].dropna()
+                nearest = match_values.apply(lambda v: (grouped_medians - v).abs().idxmin())
+                train.loc[nearest.index, attribute] = nearest
+                pending_index = pending_index.difference(nearest.index)
+                reglas_atributo.append(AllocateRule(match_attribute, 'continuous', grouped_medians))
+        if not pending_index.empty:
+            mode = train[attribute].mode()
+            if not mode.empty:
+                allocate_modo_fallback[attribute] = mode.iloc[0]
+                train.loc[pending_index, attribute] = mode.iloc[0]
+        allocate_rules[attribute] = reglas_atributo
+        if verbose:
+            print(f'[ajustar_imputacion] {attribute}: {train[attribute].isna().sum()} nulos restantes en train.')
+
+    tree_orientacion, valores_orientacion = _fit_kdtree_conocido(train, 'Orientación')
+    if tree_orientacion is not None:
+        has_coords = train['latitud'].notna() & train['longitud'].notna()
+        missing = train.loc[train['Orientación'].isna() & has_coords]
+        if not missing.empty:
+            _, nearest_idx = tree_orientacion.query(missing[['latitud', 'longitud']].to_numpy())
+            nearest_coords = tree_orientacion.data[nearest_idx]
+            distance_m = haversine_m(missing['latitud'].to_numpy(), missing['longitud'].to_numpy(),
+                                      nearest_coords[:, 0], nearest_coords[:, 1])
+            close_enough = distance_m <= ORIENTACION_VECINO_MAX_M
+            train.loc[missing.index[close_enough], 'Orientación'] = valores_orientacion[nearest_idx][close_enough]
+
+    moda_orientacion_por_barrio = (train.groupby('barrio')['Orientación']
+                                   .agg(lambda s: s.mode().iat[0] if not s.mode().empty else np.nan))
+    orientacion_na = train['Orientación'].isna()
+    train.loc[orientacion_na, 'Orientación'] = train.loc[orientacion_na, 'barrio'].map(moda_orientacion_por_barrio)
+    orientacion_na = train['Orientación'].isna()
+    moda_orientacion_global = train['Orientación'].mode().iat[0] if orientacion_na.any() else None
+    if orientacion_na.any():
+        train.loc[orientacion_na, 'Orientación'] = moda_orientacion_global
+        if verbose:
+            print(f'[ajustar_imputacion] {orientacion_na.sum()} casas de train sin barrio ni Orientación: '
+                  f'moda global ({moda_orientacion_global}).')
+
+    return ImputacionParams(
+        barrio_a_comuna=barrio_a_comuna, comunas_validas=comunas_validas,
+        tree_comuna=tree_comuna, valores_comuna=valores_comuna,
+        tree_barrio=tree_barrio, valores_barrio=valores_barrio,
+        bad_range_cuts=bad_range_cuts,
+        allocate_rules=allocate_rules, allocate_modo_fallback=allocate_modo_fallback,
+        tree_orientacion=tree_orientacion, valores_orientacion=valores_orientacion,
+        moda_orientacion_por_barrio=moda_orientacion_por_barrio,
+        moda_orientacion_global=moda_orientacion_global,
+    )
+
+
+def aplicar_imputacion(df: pd.DataFrame, params: ImputacionParams, verbose: bool = True) -> pd.DataFrame:
+    """Reproduce sobre una COPIA de `df` (nunca muta el dataframe recibido -- indispensable para
+    que los folds de PASO 5a no se contaminen entre sí) la imputación que `params` aprendió de
+    train. Mismo orden de pasos que el código original de PASO 2b."""
+    df = df.copy()
+
+    comuna_nula = df['comuna'].isna()
+    desde_barrio = comuna_nula & df['barrio'].isin(params.barrio_a_comuna.index)
+    df.loc[desde_barrio, 'comuna'] = df.loc[desde_barrio, 'barrio'].map(params.barrio_a_comuna)
+    barrio_es_comuna = df['comuna'].isna() & df['barrio'].isin(params.comunas_validas)
+    df.loc[barrio_es_comuna, 'comuna'] = df.loc[barrio_es_comuna, 'barrio']
+    df.loc[barrio_es_comuna, 'barrio'] = np.nan
+    if verbose:
+        print(f'Comunas imputadas desde el barrio: {desde_barrio.sum()}. '
+              f'Barrios que eran nombre de comuna: {barrio_es_comuna.sum()}.')
+        print(f'Quedan {df["comuna"].isna().sum()} comunas nulas para el vecino más cercano.')
+
+    _aplicar_kdtree_conocido(df, 'comuna', params.tree_comuna, params.valores_comuna)
+    if verbose:
+        print(f'Ahora hay {df["comuna"].isna().sum()} comunas con valores nulos')
+
+    df['barrio'] = df['barrio'].str.title()
+    if verbose:
+        print(f'Hay {df["barrio"].isna().sum()} casas sin barrio.')
+    _aplicar_kdtree_conocido(df, 'barrio', params.tree_barrio, params.valores_barrio)
+    if verbose:
+        print(f'Ahora hay {df["barrio"].isna().sum()} casas sin barrio.')
+
+    _nulificar_antiguedad_atipica(df)
+
+    for column, cut_value in params.bad_range_cuts.items():
+        idx = df[df[column] >= cut_value].index
+        if verbose:
+            print(f'Asignamos a nan {len(idx)} valores de la columna "{column}" (>= {cut_value})')
+        df.loc[idx, column] = np.nan
+
+    _nulificar_negativos_y_ceros(df)
+    _binarizar_amenities(df)
+
+    for attribute, reglas in params.allocate_rules.items():
+        pending_index = df[df[attribute].isna()].index
+        for regla in reglas:
+            if pending_index.empty:
+                break
+            if regla.kind == 'discrete':
+                match_values = df.loc[pending_index, regla.match_attribute]
+                resolvable = match_values[match_values.isin(regla.mapping.index)]
+                df.loc[resolvable.index, attribute] = resolvable.map(regla.mapping)
+                pending_index = pending_index.difference(resolvable.index)
+            else:
+                match_values = df.loc[pending_index, regla.match_attribute].dropna()
+                nearest = match_values.apply(lambda v: (regla.mapping - v).abs().idxmin())
+                df.loc[nearest.index, attribute] = nearest
+                pending_index = pending_index.difference(nearest.index)
+        if not pending_index.empty and attribute in params.allocate_modo_fallback:
+            df.loc[pending_index, attribute] = params.allocate_modo_fallback[attribute]
+        if verbose:
+            print(f'{attribute}: {df[attribute].isna().sum()} nulos restantes')
+
+    unidades_totales_pct_null = df['Unidades totales'].isna().mean() * 100
+    if verbose:
+        print(f'"Unidades totales": {unidades_totales_pct_null:.1f}% nulo (solo aplica a fichas de proyecto, '
+              f'no a casas individuales). No es imputable de forma confiable: se descarta la columna.')
+    df = df.drop(columns=['Unidades totales'])
+    df = df.drop(columns=['dirección'])
+    df['Gastos comunes'] = df['Gastos comunes'].apply(parse_measurement).fillna(0)
+    df['Tipo de casa'] = df['Tipo de casa'].fillna('Casa')
+    df['descripcion'] = df['descripcion'].fillna(df['titulo'])
+
+    if params.tree_orientacion is not None:
+        has_coords = df['latitud'].notna() & df['longitud'].notna()
+        missing = df.loc[df['Orientación'].isna() & has_coords]
+        if not missing.empty:
+            _, nearest_idx = params.tree_orientacion.query(missing[['latitud', 'longitud']].to_numpy())
+            nearest_coords = params.tree_orientacion.data[nearest_idx]
+            distance_m = haversine_m(missing['latitud'].to_numpy(), missing['longitud'].to_numpy(),
+                                      nearest_coords[:, 0], nearest_coords[:, 1])
+            close_enough = distance_m <= ORIENTACION_VECINO_MAX_M
+            df.loc[missing.index[close_enough], 'Orientación'] = params.valores_orientacion[nearest_idx][close_enough]
+    if verbose:
+        print(f'Orientación: {df["Orientación"].isna().sum()} nulos restantes tras imputar por vecino cercano.')
+
+    orientacion_na = df['Orientación'].isna()
+    df.loc[orientacion_na, 'Orientación'] = df.loc[orientacion_na, 'barrio'].map(params.moda_orientacion_por_barrio)
+    orientacion_na = df['Orientación'].isna()
+    if orientacion_na.any() and params.moda_orientacion_global is not None:
+        if verbose:
+            print(f'{orientacion_na.sum()} casas sin barrio ni Orientación: '
+                  f'se imputan con la moda global ({params.moda_orientacion_global}).')
+        df.loc[orientacion_na, 'Orientación'] = params.moda_orientacion_global
+    if verbose:
+        print(f'Orientación: {df["Orientación"].isna().sum()} nulos restantes')
+
+    return df
+
+
+params_imputacion = ajustar_imputacion(deptos_df, indice_train)
+deptos_df = aplicar_imputacion(deptos_df, params_imputacion)
+
+# Diagnóstico descriptivo (no alimenta ninguna decisión del modelo -- ver más abajo): nulos por
+# columna y matriz de correlación sobre el dataset YA imputado completo, con el bloque de target
+# incluido a propósito (entender qué correlaciona con el precio es el objetivo del EDA de PASO 3).
+
+na_values = deptos_df.isnull().sum()
+percent_na = ((na_values / len(deptos_df)) * 100).round(2)
+na_summary = pd.concat([na_values, percent_na], axis=1)
+na_summary.columns = ['Cantidad de Nulos', 'Porcentaje de Nulos']
+na_summary = na_summary[na_summary['Cantidad de Nulos'] > 0]
+na_summary.sort_values('Cantidad de Nulos', ascending=False, inplace=True)
+print(na_summary)
+
+sns.set(style='whitegrid')
+plt.figure(figsize=(16, 8))
+sns.set(font_scale=.75)
+if not na_summary.empty:
+    ax = sns.barplot(x='Porcentaje de Nulos', y=na_summary.index, data=na_summary)
+    plt.title('Número de valores nulos por variable')
+    plt.xlabel('Porcentaje valores nulos')
+    plt.ylabel('Atributos')
+    ax.set_xlim(0, 100)
+    plt.savefig(os.path.join(GRAFICOS_DIR, 'valores_nulos_por_variable.png'))
+
+corr = deptos_df.corr(numeric_only=True)
+corr = corr.dropna(axis=0, how='all').dropna(axis=1, how='all')
+plt.figure(figsize=(12, 10))
+sns.heatmap(corr, cmap="Blues", annot=True)
+plt.savefig(os.path.join(GRAFICOS_DIR, 'correlacion_atributos.png'))
 
 # =======================================================================================
 # PASO 3 -- EXPLORACIÓN
@@ -1075,21 +1074,24 @@ print(deptos_df.describe())
 # measurement_columns más arriba) en vez de listarlos a mano, porque son exactamente las
 # columnas que la imputación de amenities dejó en 'Sí'/resto -> 1/0.
 
-columnas_binarias = [c for c in deptos_df.columns if deptos_df[c].dtype == 'int64']
+def seleccionar_columnas(df: pd.DataFrame, verbose: bool = True) -> tuple:
+    """Extrae PASO 4a a función pura (sin fit, sin dependencia de indice_train) para que la
+    corrida única y el driver de CV de PASO 5a compartan la misma selección de columnas."""
+    columnas_binarias = [c for c in df.columns if df[c].dtype == 'int64']
+    columnas_entrenamiento = [
+        'latitud', 'longitud', 'descripcion',
+        'Superficie útil', 'Superficie total',
+        'Dormitorios', 'Baños', 'Estacionamientos', 'Bodegas',
+        'Antigüedad', 'Cantidad de pisos',
+        'Orientación', 'Gastos comunes',
+        'comuna', 'barrio', 'Tipo de casa',
+    ] + columnas_binarias
+    if verbose:
+        print(f'Columnas de entrenamiento: {len(columnas_entrenamiento)}')
+    return df[columnas_entrenamiento].copy(), df['clp'].copy()
 
-columnas_entrenamiento = [
-    'latitud', 'longitud', 'descripcion',
-    'Superficie útil', 'Superficie total',
-    'Dormitorios', 'Baños', 'Estacionamientos', 'Bodegas',
-    'Antigüedad', 'Cantidad de pisos',
-    'Orientación', 'Gastos comunes',
-    'comuna', 'barrio', 'Tipo de casa',
-] + columnas_binarias
 
-print(f'Columnas de entrenamiento: {len(columnas_entrenamiento)}')
-
-X = deptos_df[columnas_entrenamiento].copy()
-y = deptos_df['clp'].copy()
+X, y = seleccionar_columnas(deptos_df)
 
 # =======================================================================================
 # PASO 4b -- CODIFICACIÓN DE CATEGÓRICAS
@@ -1108,17 +1110,6 @@ X_train, X_test = X.loc[indice_train], X.loc[indice_test]
 y_train, y_test = y.loc[indice_train], y.loc[indice_test]
 print(f'Train: {len(X_train)} filas. Test: {len(X_test)} filas.')
 
-# 'Tipo de casa': Tríplex (40 casas) y Cabaña (1 casa) son demasiado raras para su propia columna
-# one-hot -- la de Cabaña sería un identificador de fila disfrazado de feature (ver PASO 4). Se
-# agrupan en 'Otro' antes de codificar. Es una renombrada fija de categorías (no aprende nada del
-# target ni de la distribución de train), así que se aplica igual en train y test sin riesgo de
-# fuga -- a diferencia del Target Encoding de 'barrio' más abajo, esto no necesita ir después del
-# split por seguridad, pero se deja acá junto al resto de la codificación para que quede junto.
-
-tipos_raros = {'Tríplex', 'Cabaña'}
-X_train['Tipo de casa'] = X_train['Tipo de casa'].replace(tipos_raros, 'Otro')
-X_test['Tipo de casa'] = X_test['Tipo de casa'].replace(tipos_raros, 'Otro')
-
 # Categóricas de baja cardinalidad ('comuna' 3 niveles, 'Tipo de casa' 4 tras agrupar,
 # 'Orientación' 8): One-Hot con drop='first' (evita la trampa de la variable ficticia en el
 # modelo lineal) y handle_unknown='infrequent_if_exist' (si test trae una categoría que no
@@ -1136,42 +1127,77 @@ from sklearn.preprocessing import OneHotEncoder, TargetEncoder, StandardScaler
 
 columnas_onehot = ['comuna', 'Tipo de casa', 'Orientación']
 columnas_target_encoding = ['barrio']
+TIPOS_DE_CASA_RAROS = {'Tríplex', 'Cabaña'}
 
-encoder_categoricas = ColumnTransformer(
-    transformers=[
-        ('onehot', OneHotEncoder(drop='first', handle_unknown='infrequent_if_exist', sparse_output=False),
-         columnas_onehot),
-        ('target', TargetEncoder(target_type='continuous', random_state=42), columnas_target_encoding),
-    ],
-    remainder='passthrough',
-)
 
-# El resto de las columnas (superficies, conteos, binarios, 'descripcion' como texto crudo)
-# quedan sin tocar en esta etapa -- escalado y vectorización de texto son pasos aparte del PASO 4
-# que todavía no se pidieron, así que X_*_codificado no es todavía el input final del modelo.
+@dataclass
+class CodificacionParams:
+    """`encoder_categoricas` ya viene fitted con train -- IMPORTANTE: `TargetEncoder.fit_transform`
+    hace cross-fitting interno (K-fold dentro de train), así que llamar después `.transform(X_train)`
+    con el encoder ya fitted daría un resultado DISTINTO (más optimista, sin cross-fitting) para las
+    mismas filas. Por eso `X_train_codificado` se guarda acá, tal como salió del propio
+    fit_transform -- aplicar_codificacion() nunca lo recalcula, solo se usa para filas que el
+    encoder nunca vio en su fit (val/test)."""
+    encoder_categoricas: ColumnTransformer
+    columnas_numericas_codificadas: list
+    X_train_codificado: pd.DataFrame
 
-X_train_codificado = pd.DataFrame(
-    encoder_categoricas.fit_transform(X_train, y_train),
-    columns=encoder_categoricas.get_feature_names_out(),
-    index=X_train.index,
-)
-X_test_codificado = pd.DataFrame(
-    encoder_categoricas.transform(X_test),
-    columns=encoder_categoricas.get_feature_names_out(),
-    index=X_test.index,
-)
 
-# El array que devuelve el ColumnTransformer mezcla números con el texto crudo de
-# 'remainder__descripcion' en un solo bloque, así que numpy lo tipa todo como dtype=object
-# (incluido 'target__barrio', que es un float pero queda encapsulado en un objeto). Se restaura
-# el dtype numérico columna por columna, dejando 'descripcion' como texto -- si no, cualquier
-# describe()/cálculo posterior sobre las columnas numéricas se rompe silenciosamente.
+def _agrupar_tipos_de_casa_raros(X: pd.DataFrame) -> pd.DataFrame:
+    """Tríplex (40 casas) y Cabaña (1 casa) son demasiado raras para su propia columna one-hot --
+    la de Cabaña sería un identificador de fila disfrazado de feature (ver PASO 4). Renombrada fija
+    de categorías (no aprende nada del target ni de la distribución de train), así que se aplica
+    igual en cualquier X sin riesgo de fuga."""
+    X = X.copy()
+    X['Tipo de casa'] = X['Tipo de casa'].replace(TIPOS_DE_CASA_RAROS, 'Otro')
+    return X
 
-columnas_numericas_codificadas = [c for c in X_train_codificado.columns if c != 'remainder__descripcion']
-X_train_codificado[columnas_numericas_codificadas] = X_train_codificado[columnas_numericas_codificadas].apply(pd.to_numeric)
-X_test_codificado[columnas_numericas_codificadas] = X_test_codificado[columnas_numericas_codificadas].apply(pd.to_numeric)
 
-print(f'Columnas tras codificar categóricas: {X_train_codificado.shape[1]} (antes: {X_train.shape[1]})')
+def _restaurar_dtypes_codificados(X_codificado: pd.DataFrame, columnas_numericas: list) -> pd.DataFrame:
+    """El array que devuelve el ColumnTransformer mezcla números con el texto crudo de
+    'remainder__descripcion' en un solo bloque, así que numpy lo tipa todo como dtype=object
+    (incluido 'target__barrio', que es un float pero queda encapsulado en un objeto). Se restaura
+    el dtype numérico columna por columna, dejando 'descripcion' como texto -- si no, cualquier
+    describe()/cálculo posterior sobre las columnas numéricas se rompe silenciosamente."""
+    X_codificado[columnas_numericas] = X_codificado[columnas_numericas].apply(pd.to_numeric)
+    return X_codificado
+
+
+def ajustar_codificacion(X_train: pd.DataFrame, y_train: pd.Series, verbose: bool = True) -> CodificacionParams:
+    X_train = _agrupar_tipos_de_casa_raros(X_train)
+    encoder_categoricas = ColumnTransformer(
+        transformers=[
+            ('onehot', OneHotEncoder(drop='first', handle_unknown='infrequent_if_exist', sparse_output=False),
+             columnas_onehot),
+            ('target', TargetEncoder(target_type='continuous', random_state=42), columnas_target_encoding),
+        ],
+        remainder='passthrough',
+    )
+    X_train_codificado = pd.DataFrame(
+        encoder_categoricas.fit_transform(X_train, y_train),
+        columns=encoder_categoricas.get_feature_names_out(),
+        index=X_train.index,
+    )
+    columnas_numericas_codificadas = [c for c in X_train_codificado.columns if c != 'remainder__descripcion']
+    X_train_codificado = _restaurar_dtypes_codificados(X_train_codificado, columnas_numericas_codificadas)
+    if verbose:
+        print(f'Columnas tras codificar categóricas: {X_train_codificado.shape[1]} (antes: {X_train.shape[1]})')
+    return CodificacionParams(encoder_categoricas, columnas_numericas_codificadas, X_train_codificado)
+
+
+def aplicar_codificacion(X: pd.DataFrame, params: CodificacionParams) -> pd.DataFrame:
+    X = _agrupar_tipos_de_casa_raros(X)
+    X_codificado = pd.DataFrame(
+        params.encoder_categoricas.transform(X),
+        columns=params.encoder_categoricas.get_feature_names_out(),
+        index=X.index,
+    )
+    return _restaurar_dtypes_codificados(X_codificado, params.columnas_numericas_codificadas)
+
+
+params_codificacion = ajustar_codificacion(X_train, y_train)
+X_train_codificado = params_codificacion.X_train_codificado
+X_test_codificado = aplicar_codificacion(X_test, params_codificacion)
 
 # =======================================================================================
 # PASO 4c -- ¿VALE LA PENA VECTORIZAR 'descripcion'? VALIDACIÓN ANTES DE IMPLEMENTAR
@@ -1304,25 +1330,52 @@ columnas_solo_scale = ['remainder__Dormitorios', 'remainder__Baños', 'remainder
                        'remainder__Bodegas', 'remainder__Cantidad de pisos']
 columna_antiguedad = 'remainder__Antigüedad'
 
-X_train_final = X_train_codificado[columnas_sin_texto].copy()
-X_test_final = X_test_codificado[columnas_sin_texto].copy()
 
-escalador_log = StandardScaler()
-X_train_final[columnas_log_scale] = escalador_log.fit_transform(np.log1p(X_train_final[columnas_log_scale]))
-X_test_final[columnas_log_scale] = escalador_log.transform(np.log1p(X_test_final[columnas_log_scale]))
+@dataclass
+class EscaladoNumericoParams:
+    escalador_log: StandardScaler
+    escalador_conteos: StandardScaler
+    escalador_antiguedad: StandardScaler
+    X_train_final: pd.DataFrame
 
-escalador_conteos = StandardScaler()
-X_train_final[columnas_solo_scale] = escalador_conteos.fit_transform(X_train_final[columnas_solo_scale])
-X_test_final[columnas_solo_scale] = escalador_conteos.transform(X_test_final[columnas_solo_scale])
 
-X_train_final[columna_antiguedad] = X_train_final[columna_antiguedad].clip(0, 120)
-X_test_final[columna_antiguedad] = X_test_final[columna_antiguedad].clip(0, 120)
-escalador_antiguedad = StandardScaler()
-X_train_final[[columna_antiguedad]] = escalador_antiguedad.fit_transform(X_train_final[[columna_antiguedad]])
-X_test_final[[columna_antiguedad]] = escalador_antiguedad.transform(X_test_final[[columna_antiguedad]])
+def ajustar_escalado_numerico(X_train_codificado: pd.DataFrame, verbose: bool = True) -> EscaladoNumericoParams:
+    # Recalculado localmente (no el global de PASO 4c) -- las columnas codificadas pueden variar
+    # levemente entre folds de PASO 5a, así que no hay que asumir que coinciden con las del split
+    # fijo de la corrida única.
+    columnas_sin_texto_local = [c for c in X_train_codificado.columns if c != 'remainder__descripcion']
+    X_train_final = X_train_codificado[columnas_sin_texto_local].copy()
 
+    escalador_log = StandardScaler()
+    X_train_final[columnas_log_scale] = escalador_log.fit_transform(np.log1p(X_train_final[columnas_log_scale]))
+
+    escalador_conteos = StandardScaler()
+    X_train_final[columnas_solo_scale] = escalador_conteos.fit_transform(X_train_final[columnas_solo_scale])
+
+    X_train_final[columna_antiguedad] = X_train_final[columna_antiguedad].clip(0, 120)
+    escalador_antiguedad = StandardScaler()
+    X_train_final[[columna_antiguedad]] = escalador_antiguedad.fit_transform(X_train_final[[columna_antiguedad]])
+
+    if verbose:
+        print(f'X_train_final: {X_train_final.shape}.')
+        print(X_train_final[columnas_log_scale + columnas_solo_scale + [columna_antiguedad]].describe())
+    return EscaladoNumericoParams(escalador_log, escalador_conteos, escalador_antiguedad, X_train_final)
+
+
+def aplicar_escalado_numerico(X_codificado: pd.DataFrame, params: EscaladoNumericoParams) -> pd.DataFrame:
+    columnas_sin_texto_local = [c for c in X_codificado.columns if c != 'remainder__descripcion']
+    X_final = X_codificado[columnas_sin_texto_local].copy()
+    X_final[columnas_log_scale] = params.escalador_log.transform(np.log1p(X_final[columnas_log_scale]))
+    X_final[columnas_solo_scale] = params.escalador_conteos.transform(X_final[columnas_solo_scale])
+    X_final[columna_antiguedad] = X_final[columna_antiguedad].clip(0, 120)
+    X_final[[columna_antiguedad]] = params.escalador_antiguedad.transform(X_final[[columna_antiguedad]])
+    return X_final
+
+
+params_escalado = ajustar_escalado_numerico(X_train_codificado)
+X_train_final = params_escalado.X_train_final
+X_test_final = aplicar_escalado_numerico(X_test_codificado, params_escalado)
 print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
-print(X_train_final[columnas_log_scale + columnas_solo_scale + [columna_antiguedad]].describe())
 
 # =======================================================================================
 # PASO 4e -- FEATURES DE DISTANCIA DESDE LATITUD/LONGITUD
@@ -1356,9 +1409,17 @@ PUNTOS_DE_INTERES = {
     'estadio_espanol': (-33.4147, -70.5771),
     'portal_la_dehesa': (-33.3579, -70.5152),
 }
+columnas_distancia = [f'distancia_{nombre}_m' for nombre in PUNTOS_DE_INTERES] + ['distancia_centroide_comuna_m']
 
 
-def agregar_distancias(df: pd.DataFrame, comuna_por_fila: pd.Series, centroide_comuna: pd.DataFrame) -> None:
+@dataclass
+class DistanciaParams:
+    centroide_comuna: pd.DataFrame
+    escalador_distancias: StandardScaler
+    X_train_final: pd.DataFrame
+
+
+def _agregar_distancias(df: pd.DataFrame, comuna_por_fila: pd.Series, centroide_comuna: pd.DataFrame) -> None:
     for nombre, (lat_punto, lon_punto) in PUNTOS_DE_INTERES.items():
         df[f'distancia_{nombre}_m'] = haversine_m(df['remainder__latitud'], df['remainder__longitud'],
                                                     lat_punto, lon_punto)
@@ -1368,37 +1429,38 @@ def agregar_distancias(df: pd.DataFrame, comuna_por_fila: pd.Series, centroide_c
                                                        lat_centroide, lon_centroide)
 
 
-centroide_comuna = X_train_final.groupby(X_train['comuna'])[['remainder__latitud', 'remainder__longitud']].mean()
-agregar_distancias(X_train_final, X_train['comuna'], centroide_comuna)
-agregar_distancias(X_test_final, X_test['comuna'], centroide_comuna)
+def ajustar_features_distancia(X_train_final: pd.DataFrame, comuna_train: pd.Series,
+                                verbose: bool = True) -> DistanciaParams:
+    X_train_final = X_train_final.copy()
+    centroide_comuna = X_train_final.groupby(comuna_train)[['remainder__latitud', 'remainder__longitud']].mean()
+    _agregar_distancias(X_train_final, comuna_train, centroide_comuna)
+    if verbose:
+        print(X_train_final[columnas_distancia].describe())
+        print('skew:', X_train_final[columnas_distancia].skew().to_dict())
 
-columnas_distancia = [f'distancia_{nombre}_m' for nombre in PUNTOS_DE_INTERES] + ['distancia_centroide_comuna_m']
-print(X_train_final[columnas_distancia].describe())
-print('skew:', X_train_final[columnas_distancia].skew().to_dict())
+    # Con las distancias calculadas, 'latitud'/'longitud' crudas ya cumplieron su propósito y se
+    # eliminan del set de features -- dejarlas junto con las distancias sería redundante y
+    # volvería a exponer al modelo lineal a la coordenada cruda que se quería evitar.
+    X_train_final = X_train_final.drop(columns=['remainder__latitud', 'remainder__longitud'])
 
-# Con las distancias calculadas, 'latitud'/'longitud' crudas ya cumplieron su propósito y se
-# eliminan del set de features -- dejarlas junto con las distancias sería redundante (las
-# distancias ya son una transformación de esas mismas dos columnas) y volvería a exponer al
-# modelo lineal a la coordenada cruda que se quería evitar.
+    X_train_final[columnas_distancia] = np.log1p(X_train_final[columnas_distancia])
+    escalador_distancias = StandardScaler()
+    X_train_final[columnas_distancia] = escalador_distancias.fit_transform(X_train_final[columnas_distancia])
+    return DistanciaParams(centroide_comuna, escalador_distancias, X_train_final)
 
-X_train_final = X_train_final.drop(columns=['remainder__latitud', 'remainder__longitud'])
-X_test_final = X_test_final.drop(columns=['remainder__latitud', 'remainder__longitud'])
 
-# log1p + estandarizar, mismo criterio que las superficies en PASO 4d: la distancia responde al
-# precio de forma multiplicativa en un modelo hedónico (el mismo argumento que ya se usa para
-# Superficie total/útil, ver cabecera del archivo), y el skew medido arriba lo confirma -- 0,55 a
-# 0,88 en las tres distancias a puntos fijos, pero 4,06 en la del centroide de la propia comuna
-# (por los refugios de Farellones/La Parva, legítimamente lejos de su centroide). Se aplica log1p
-# a las 4 por igual para no tratar distinto a features de la misma familia: no perjudica a las
-# tres que ya estaban casi simétricas, y corrige la que sí lo necesitaba.
+def aplicar_features_distancia(X_final: pd.DataFrame, comuna: pd.Series, params: DistanciaParams) -> pd.DataFrame:
+    X_final = X_final.copy()
+    _agregar_distancias(X_final, comuna, params.centroide_comuna)
+    X_final = X_final.drop(columns=['remainder__latitud', 'remainder__longitud'])
+    X_final[columnas_distancia] = np.log1p(X_final[columnas_distancia])
+    X_final[columnas_distancia] = params.escalador_distancias.transform(X_final[columnas_distancia])
+    return X_final
 
-X_train_final[columnas_distancia] = np.log1p(X_train_final[columnas_distancia])
-X_test_final[columnas_distancia] = np.log1p(X_test_final[columnas_distancia])
 
-escalador_distancias = StandardScaler()
-X_train_final[columnas_distancia] = escalador_distancias.fit_transform(X_train_final[columnas_distancia])
-X_test_final[columnas_distancia] = escalador_distancias.transform(X_test_final[columnas_distancia])
-
+params_distancia = ajustar_features_distancia(X_train_final, X_train['comuna'])
+X_train_final = params_distancia.X_train_final
+X_test_final = aplicar_features_distancia(X_test_final, X_test['comuna'], params_distancia)
 print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
 
 # =======================================================================================
@@ -1421,36 +1483,51 @@ print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}
 # Sin guard contra división por cero: 'Dormitorios' y 'Superficie total' no tienen ceros en todo
 # el dataset limpio, medido, no supuesto (ver mín. de ambas en el describe() de PASO 3).
 
-X_train_final['ratio_construido'] = X_train['Superficie útil'] / X_train['Superficie total']
-X_test_final['ratio_construido'] = X_test['Superficie útil'] / X_test['Superficie total']
-
-X_train_final['m2_por_dormitorio'] = X_train['Superficie útil'] / X_train['Dormitorios']
-X_test_final['m2_por_dormitorio'] = X_test['Superficie útil'] / X_test['Dormitorios']
-
-X_train_final['banos_por_dormitorio'] = X_train['Baños'] / X_train['Dormitorios']
-X_test_final['banos_por_dormitorio'] = X_test['Baños'] / X_test['Dormitorios']
-
 columnas_ratios = ['ratio_construido', 'm2_por_dormitorio', 'banos_por_dormitorio']
-print(X_train_final[columnas_ratios].describe())
-print('skew:', X_train_final[columnas_ratios].skew().to_dict())
-
-# Escalado con el mismo criterio de forma que PASO 4d, medido sobre train (ver skew impreso
-# arriba): ratio_construido (skew 0,75) y baños_por_dormitorio (skew 0,73) son aproximadamente
-# simétricos -- StandardScaler directo, igual que los conteos. m2_por_dormitorio (skew 11,7)
-# hereda la cola pesada de 'Superficie útil' (mismo numerador) y necesita log1p antes de
-# estandarizar, igual que las superficies.
-
 columnas_ratio_simetricos = ['ratio_construido', 'banos_por_dormitorio']
-escalador_ratios = StandardScaler()
-X_train_final[columnas_ratio_simetricos] = escalador_ratios.fit_transform(X_train_final[columnas_ratio_simetricos])
-X_test_final[columnas_ratio_simetricos] = escalador_ratios.transform(X_test_final[columnas_ratio_simetricos])
 
-escalador_m2_dormitorio = StandardScaler()
-X_train_final[['m2_por_dormitorio']] = escalador_m2_dormitorio.fit_transform(
-    np.log1p(X_train_final[['m2_por_dormitorio']]))
-X_test_final[['m2_por_dormitorio']] = escalador_m2_dormitorio.transform(
-    np.log1p(X_test_final[['m2_por_dormitorio']]))
 
+@dataclass
+class RatiosParams:
+    escalador_ratios: StandardScaler
+    escalador_m2_dormitorio: StandardScaler
+    X_train_final: pd.DataFrame
+
+
+def _agregar_ratios(X_final: pd.DataFrame, X_crudo: pd.DataFrame) -> None:
+    X_final['ratio_construido'] = X_crudo['Superficie útil'] / X_crudo['Superficie total']
+    X_final['m2_por_dormitorio'] = X_crudo['Superficie útil'] / X_crudo['Dormitorios']
+    X_final['banos_por_dormitorio'] = X_crudo['Baños'] / X_crudo['Dormitorios']
+
+
+def ajustar_ratios(X_train_final: pd.DataFrame, X_train_crudo: pd.DataFrame, verbose: bool = True) -> RatiosParams:
+    X_train_final = X_train_final.copy()
+    _agregar_ratios(X_train_final, X_train_crudo)
+    if verbose:
+        print(X_train_final[columnas_ratios].describe())
+        print('skew:', X_train_final[columnas_ratios].skew().to_dict())
+
+    escalador_ratios = StandardScaler()
+    X_train_final[columnas_ratio_simetricos] = escalador_ratios.fit_transform(X_train_final[columnas_ratio_simetricos])
+
+    escalador_m2_dormitorio = StandardScaler()
+    X_train_final[['m2_por_dormitorio']] = escalador_m2_dormitorio.fit_transform(
+        np.log1p(X_train_final[['m2_por_dormitorio']]))
+
+    return RatiosParams(escalador_ratios, escalador_m2_dormitorio, X_train_final)
+
+
+def aplicar_ratios(X_final: pd.DataFrame, X_crudo: pd.DataFrame, params: RatiosParams) -> pd.DataFrame:
+    X_final = X_final.copy()
+    _agregar_ratios(X_final, X_crudo)
+    X_final[columnas_ratio_simetricos] = params.escalador_ratios.transform(X_final[columnas_ratio_simetricos])
+    X_final[['m2_por_dormitorio']] = params.escalador_m2_dormitorio.transform(np.log1p(X_final[['m2_por_dormitorio']]))
+    return X_final
+
+
+params_ratios = ajustar_ratios(X_train_final, X_train)
+X_train_final = params_ratios.X_train_final
+X_test_final = aplicar_ratios(X_test_final, X_test, params_ratios)
 print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
 
 # =======================================================================================
@@ -1519,8 +1596,10 @@ print('VIF con los 3 ratios agregados:',
 #   - El VIF residual no es grave: infla varianza de coeficientes puntuales, no invalida la
 #     predicción, y es indiferente para el modelo de árboles. No justifica el costo.
 
-X_train_final = X_train_final.drop(columns=['remainder__Superficie útil'])
-X_test_final = X_test_final.drop(columns=['remainder__Superficie útil'])
+COLUMNAS_DROP_ESTRUCTURAL = ['remainder__Superficie útil']  # regla fija, no se recalcula por fold (ver PASO 5a)
+
+X_train_final = X_train_final.drop(columns=COLUMNAS_DROP_ESTRUCTURAL)
+X_test_final = X_test_final.drop(columns=COLUMNAS_DROP_ESTRUCTURAL)
 
 columnas_vif_post = ['remainder__Superficie total', 'remainder__Dormitorios',
                      'remainder__Baños'] + columnas_ratios
@@ -1569,22 +1648,29 @@ print(f'Diferencia: {mdape_baseline - mdape_sin_texto:.2f} puntos porcentuales '
 # =======================================================================================
 # PASO 4i -- 'GASTOS COMUNES' > 0 COMO BINARIA
 # =======================================================================================
-# 'Gastos comunes' ya entra al modelo como valor continuo (log1p + StandardScaler, ver PASO 4d),
-# pero la columna es medio indicador y medio monto: 83,9% de las casas en train vale 0 (sin gasto
-# común, típicamente casas fuera de condominio) y el resto trae un monto real. Se agrega
-# 'tiene_gastos_comunes' = (Gastos comunes > 0) para que el modelo lineal separe el efecto de
-# "está en condominio con administración" del monto en sí, en vez de que ambas señales queden
-# mezcladas en un solo coeficiente sobre log1p(Gastos comunes).
+# El nulo de 'Gastos comunes' se rellenó con 0 en la carga (línea 741), junto con los avisos que sí
+# declararon 0 CLP de gasto común. 47% de las filas en train son ese nulo relleno, así que esta
+# binaria no distingue "está en condominio con administración" de "no lo está" -- distingue si el
+# corredor informó el dato o no. Confirmado: importancia por permutación 0,000000 (ver PASO 4k).
+# Se deja el nombre honesto sobre lo que mide, en vez de 'tiene_gastos_comunes'.
 #
 # Se calcula sobre el valor CRUDO de X_train/X_test (antes del log1p+scale que PASO 4d ya aplicó
 # in-place a 'remainder__Gastos comunes' en X_train_final), mismo criterio que los ratios de
 # PASO 4f. Es binaria: no se escala (ver PASO 4d).
 
-X_train_final['tiene_gastos_comunes'] = (X_train['Gastos comunes'] > 0).astype(int)
-X_test_final['tiene_gastos_comunes'] = (X_test['Gastos comunes'] > 0).astype(int)
+def agregar_gastos_comunes_informado(X_final: pd.DataFrame, X_crudo: pd.DataFrame) -> pd.DataFrame:
+    """Regla fija, sin fit: no depende de train ni de fold. Ver nota arriba sobre por qué es
+    'informado' y no 'tiene'."""
+    X_final = X_final.copy()
+    X_final['gastos_comunes_informado'] = (X_crudo['Gastos comunes'] > 0).astype(int)
+    return X_final
 
-print('tiene_gastos_comunes en train:',
-      X_train_final['tiene_gastos_comunes'].value_counts(normalize=True).round(3).to_dict())
+
+X_train_final = agregar_gastos_comunes_informado(X_train_final, X_train)
+X_test_final = agregar_gastos_comunes_informado(X_test_final, X_test)
+
+print('gastos_comunes_informado en train:',
+      X_train_final['gastos_comunes_informado'].value_counts(normalize=True).round(3).to_dict())
 print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
 
 # =======================================================================================
@@ -1613,31 +1699,47 @@ def proyectar_metros(lat: pd.Series, lon: pd.Series, lat0: float, lon0: float) -
     return np.column_stack([x, y])
 
 
-lat0, lon0 = X_train['latitud'].mean(), X_train['longitud'].mean()
-coords_train_m = proyectar_metros(X_train['latitud'], X_train['longitud'], lat0, lon0)
-coords_test_m = proyectar_metros(X_test['latitud'], X_test['longitud'], lat0, lon0)
+@dataclass
+class DensidadParams:
+    lat0: float
+    lon0: float
+    arbol_densidad: object
+    escalador_densidad: StandardScaler
+    X_train_final: pd.DataFrame
 
-arbol_densidad = cKDTree(coords_train_m)
 
-# Cada casa de train está en el propio árbol -- se resta 1 para no contarse a sí misma. Test no
-# tiene ese problema: el árbol solo contiene coordenadas de train.
-densidad_train = arbol_densidad.query_ball_point(coords_train_m, r=RADIO_DENSIDAD_M, return_length=True) - 1
-densidad_test = arbol_densidad.query_ball_point(coords_test_m, r=RADIO_DENSIDAD_M, return_length=True)
+def ajustar_densidad(X_train_final: pd.DataFrame, X_train_crudo: pd.DataFrame, verbose: bool = True) -> DensidadParams:
+    X_train_final = X_train_final.copy()
+    lat0, lon0 = X_train_crudo['latitud'].mean(), X_train_crudo['longitud'].mean()
+    coords_train_m = proyectar_metros(X_train_crudo['latitud'], X_train_crudo['longitud'], lat0, lon0)
+    arbol_densidad = cKDTree(coords_train_m)
 
-X_train_final['densidad_oferta_500m'] = densidad_train
-X_test_final['densidad_oferta_500m'] = densidad_test
+    # Cada casa de train está en el propio árbol -- se resta 1 para no contarse a sí misma.
+    densidad_train = arbol_densidad.query_ball_point(coords_train_m, r=RADIO_DENSIDAD_M, return_length=True) - 1
+    X_train_final['densidad_oferta_500m'] = densidad_train
+    if verbose:
+        print(X_train_final['densidad_oferta_500m'].describe())
+        print('skew:', X_train_final['densidad_oferta_500m'].skew())
 
-print(X_train_final['densidad_oferta_500m'].describe())
-print('skew:', X_train_final['densidad_oferta_500m'].skew())
+    escalador_densidad = StandardScaler()
+    X_train_final[['densidad_oferta_500m']] = escalador_densidad.fit_transform(X_train_final[['densidad_oferta_500m']])
+    return DensidadParams(lat0, lon0, arbol_densidad, escalador_densidad, X_train_final)
 
-# Escalado con el mismo criterio de forma que el resto de PASO 4: skew medido 0,43, por debajo
-# del umbral de 1,2 que ya usa PASO 4d para los conteos acotados (Dormitorios/Baños) -- a
-# diferencia de las superficies, no tiene cola pesada, así que StandardScaler directo, sin log1p.
 
-escalador_densidad = StandardScaler()
-X_train_final[['densidad_oferta_500m']] = escalador_densidad.fit_transform(X_train_final[['densidad_oferta_500m']])
-X_test_final[['densidad_oferta_500m']] = escalador_densidad.transform(X_test_final[['densidad_oferta_500m']])
+def aplicar_densidad(X_final: pd.DataFrame, X_crudo: pd.DataFrame, params: DensidadParams) -> pd.DataFrame:
+    """A diferencia de train, las filas de `X_crudo` NO están en `arbol_densidad` (que solo
+    contiene coordenadas de train) -- no hace falta restar 1."""
+    X_final = X_final.copy()
+    coords_m = proyectar_metros(X_crudo['latitud'], X_crudo['longitud'], params.lat0, params.lon0)
+    X_final['densidad_oferta_500m'] = params.arbol_densidad.query_ball_point(
+        coords_m, r=RADIO_DENSIDAD_M, return_length=True)
+    X_final[['densidad_oferta_500m']] = params.escalador_densidad.transform(X_final[['densidad_oferta_500m']])
+    return X_final
 
+
+params_densidad = ajustar_densidad(X_train_final, X_train)
+X_train_final = params_densidad.X_train_final
+X_test_final = aplicar_densidad(X_test_final, X_test, params_densidad)
 print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
 
 # =======================================================================================
@@ -1729,4 +1831,540 @@ print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}
 # folds -- pendiente. Mientras tanto se conserva el feature set completo, que es la opción
 # conservadora: una columna irrelevante le cuesta poco a un modelo de árboles, y descartar una
 # que sí aportaba no se recupera.
+
+# =======================================================================================
+# PASO 4 -- WRAPPERS DE ORQUESTACIÓN (ajustar_features / aplicar_features)
+# =======================================================================================
+# Para el driver de CV de PASO 5a: encadenan los 5 pares finos de arriba (4b, 4d, 4e, 4f, 4j) más
+# el drop estructural de 4g y la binaria de 4i, en el mismo orden que la corrida única de más
+# arriba. NO incluyen PASO 4c (validación de texto, no llega a producción) ni PASO 4k (selección
+# por importancia de permutación) -- ver la nota de scope en PASO 5a más abajo sobre por qué la
+# selección de columnas se deja fuera del refit por fold.
+
+
+@dataclass
+class FeatureParams:
+    codificacion: CodificacionParams
+    escalado: EscaladoNumericoParams
+    distancia: DistanciaParams
+    ratios: RatiosParams
+    densidad: DensidadParams
+    X_train_final: pd.DataFrame
+
+
+def ajustar_features(X_train: pd.DataFrame, y_train: pd.Series, verbose: bool = False) -> FeatureParams:
+    codificacion = ajustar_codificacion(X_train, y_train, verbose=verbose)
+    escalado = ajustar_escalado_numerico(codificacion.X_train_codificado, verbose=verbose)
+    distancia = ajustar_features_distancia(escalado.X_train_final, X_train['comuna'], verbose=verbose)
+    ratios = ajustar_ratios(distancia.X_train_final, X_train, verbose=verbose)
+
+    X_train_final = ratios.X_train_final.drop(columns=COLUMNAS_DROP_ESTRUCTURAL)
+    X_train_final = agregar_gastos_comunes_informado(X_train_final, X_train)
+
+    densidad = ajustar_densidad(X_train_final, X_train, verbose=verbose)
+    return FeatureParams(codificacion, escalado, distancia, ratios, densidad, densidad.X_train_final)
+
+
+def aplicar_features(X: pd.DataFrame, params: FeatureParams) -> pd.DataFrame:
+    X_codificado = aplicar_codificacion(X, params.codificacion)
+    X_final = aplicar_escalado_numerico(X_codificado, params.escalado)
+    X_final = aplicar_features_distancia(X_final, X['comuna'], params.distancia)
+    X_final = aplicar_ratios(X_final, X, params.ratios)
+    X_final = X_final.drop(columns=COLUMNAS_DROP_ESTRUCTURAL)
+    X_final = agregar_gastos_comunes_informado(X_final, X)
+    X_final = aplicar_densidad(X_final, X, params.densidad)
+    return X_final
+
+
+# =======================================================================================
+# PASO 5 -- ESTRATEGIA DE MODELAMIENTO (diseño, aún no implementado)
+# =======================================================================================
+#
+# Punto de partida: PASO 4k deja X_train_final / X_test_final ya armados (82 columnas: categóricas
+# codificadas, numéricas log+escaladas, ratios, distancias, densidad) y el target en CLP en
+# y_train / y_test, que se modela como log(clp) (ver cabecera del archivo). Tres piezas ya existen
+# y no hay que reconstruirlas: mdape() (PASO 4c), el baseline de mediana de precio/m² por barrio
+# (PASO 4h) y un HistGradientBoostingRegressor con defaults, entrenado en PASO 4k como herramienta
+# de selección de features -- no como modelo final.
+#
+# Lo que falta NO es "entrenar un modelo": eso ya ocurre de facto. Lo que falta es lo que convierte
+# una predicción en una decisión de compra: saber cuánto vale esa predicción caso a caso
+# (intervalos), cuán estable es la medición (validación cruzada) y cómo se traduce el error en una
+# lista accionable (ranking).
+#
+# El entregable del proyecto no es el modelo, es la lista de casas a visitar. Medido: un modelo con
+# 8,39% de MdAPE que no sabe cuándo NO sabe produce, con un umbral fijo de ±10%, una lista con el
+# 43% del inventario -- que es lo mismo que no producir nada.
+#
+# PUNTO DE PARTIDA MEDIDO (última corrida completa; sirve para detectar regresiones)
+# ---------------------------------------------------------------------------------
+#   Filas 5.284 (train 4.227 / test 1.057)   |   features 82
+#   MdAPE HistGB (test)                            8,39 %
+#   MdAPE baseline mediana precio/m² por barrio   21,50 %
+#   MAE                                          150.912.000 CLP
+#   RMSE                                         295.966.827 CLP
+#   Residuo p10 / p50 / p90               -15,8 % / -0,5 % / +20,1 %      (p99: +80,8 %)
+#   Mismo modelo, tres semillas de split   8,15 % / 8,29 % / 8,51 %  -> ruido de 0,36 puntos
+#
+# ORDEN DE OPERACIONES (no negociable)
+# ------------------------------------
+# 1. Todo lo que decida algo -- features, hiperparámetros, familia de modelo -- se decide con CV
+#    sobre TRAIN. Un hiperparámetro elegido mirando test es la misma fuga que una feature elegida
+#    mirando test.
+# 2. test se evalúa UNA sola vez, al final, y no se vuelve atrás. Si se mira test y después se
+#    cambia algo, test dejó de ser holdout y el número deja de estimar el error fuera de muestra.
+# 3. Primero el protocolo de medición (5a), después todo lo demás: sin conocer el ruido de medición
+#    no se puede saber si una mejora es una mejora. Ya pasó una vez -- ver la advertencia al final
+#    de PASO 4k, donde el criterio de selección de features se dio vuelta solo por el ruido.
+# 4. Los intervalos (5e) van ANTES del ranking (5f). Un ranking sin intervalo es el umbral fijo que
+#    ya se descartó por medición.
+# 5. La calibración de los intervalos necesita datos que el modelo no vio: sale de un fold de
+#    calibración recortado de TRAIN, nunca de test.
+#
+# SUB-PASOS
+# ---------
+#   5a  Protocolo de evaluación: validación cruzada repetida
+#   5b  Modelo lineal log-log (el modelo interpretable que la cabecera promete)
+#   5c  Tuning de hiperparámetros del modelo de árboles
+#   5d  Evaluación final en test: MdAPE + MAE + RMSE + percentiles, desagregado
+#   5e  Intervalos de predicción                        <- bloquea el objetivo de negocio
+#   5f  Residuo, regla de flag y ranking
+#   5g  Filtros del comprador sobre el ranking
+#   5h  Export de casas_candidatas.xlsx
+#   5i  Mapa
+#   5j  Límites: qué NO puede responder este modelo
+
+# =======================================================================================
+# PASO 5a -- PROTOCOLO DE EVALUACIÓN: VALIDACIÓN CRUZADA REPETIDA
+# =======================================================================================
+# Va primero porque ningún resultado posterior es interpretable sin saber cuánto ruido tiene la
+# medición. Medido: el mismo modelo con el mismo feature set, cambiando solo la semilla del split,
+# da 8,15% / 8,29% / 8,51%. Cualquier mejora menor a ~0,4 puntos reportada sobre una sola partición
+# es indistinguible de haber tenido suerte con la semilla.
+#
+# Ya no queda la "TRAMPA ARQUITECTÓNICA" que advertía la versión anterior de este bloque: PASO
+# 2b-4j se refactorizaron a pares ajustar()/aplicar() (ver más arriba), así que cada fold de abajo
+# reajusta TODO -- KDTree de comuna/barrio/orientación, bad_ranges, allocate_values, TargetEncoder
+# de barrio, los escaladores, centroide de comuna, densidad local -- con SUS PROPIOS índices de
+# train, no con los de `indice_train` del split fijo.
+#
+# Alcance deliberadamente fuera de esta CV (ver PASO 5a en el bloque de diseño original, ahora
+# resuelto en la práctica):
+#   - PASO 4k (selección por importancia de permutación) NO se repite por fold: cada fold usa el
+#     feature set completo (82 columnas menos el drop de 4g). Recalcularla por fold sería nested-
+#     selection carísimo, y el propósito de esta CV es medir el modelo, no repetir esa decisión --
+#     que además la propia advertencia de 4k ya mostró que es ruido, no señal.
+#   - PASO 4g (VIF) tampoco se recalcula: el drop de 'Superficie útil' es una regla estructural
+#     fija (redundancia exacta con total×ratio_construido), no depende de qué filas cayeron en
+#     train.
+#   - PASO 4h (baseline mediana precio/m² por barrio) sigue siendo diagnóstico de un solo split.
+#
+# Universo de la CV: `deptos_df_limpio.loc[indice_train]` -- las 4.227 filas de train fijo (nunca
+# `indice_test`, que se preserva intacto como holdout final para PASO 5d). La CV reparte de nuevo
+# esas filas en folds internos, sobre la versión SIN la imputación ya fijada por el split 80/20,
+# para poder reajustarla por fold.
+
+from sklearn.model_selection import StratifiedKFold
+
+
+def ejecutar_cv_repetida(universo: pd.DataFrame, n_splits: int = 5, n_repeats: int = 3,
+                          random_state: int = 42) -> pd.Series:
+    """CV repetida (n_splits x n_repeats folds) estratificada por 'comuna' -- mismo criterio del
+    split fijo de PASO 2b/4b. Cada fold reajusta TODO el pipeline (ajustar_imputacion +
+    ajustar_features) con sus propios índices de train, y evalúa MdAPE sobre su propia porción de
+    validación. verbose=False en los ajustar_*/aplicar_* internos: con 15 folds, el log completo
+    de cada uno (idéntico al de la corrida única) inundaría la salida."""
+    etiquetas = universo['comuna'].fillna('Desconocida')
+    scores = []
+    for repeat in range(n_repeats):
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state + repeat)
+        for fold, (pos_train, pos_val) in enumerate(skf.split(universo, etiquetas)):
+            idx_train_fold = universo.index[pos_train]
+            idx_val_fold = universo.index[pos_val]
+
+            params_imp_fold = ajustar_imputacion(universo, idx_train_fold, verbose=False)
+            df_fold = aplicar_imputacion(universo, params_imp_fold, verbose=False)
+
+            X_fold, y_fold = seleccionar_columnas(df_fold, verbose=False)
+            X_tr, X_val = X_fold.loc[idx_train_fold], X_fold.loc[idx_val_fold]
+            y_tr, y_val = y_fold.loc[idx_train_fold], y_fold.loc[idx_val_fold]
+
+            params_feat_fold = ajustar_features(X_tr, y_tr, verbose=False)
+            X_val_final = aplicar_features(X_val, params_feat_fold)
+
+            if X_val_final.shape[1] != params_feat_fold.X_train_final.shape[1]:
+                print(f'[repeat {repeat} fold {fold}] ADVERTENCIA: columnas desalineadas -- '
+                      f'train {params_feat_fold.X_train_final.shape[1]} vs val {X_val_final.shape[1]}')
+                X_val_final = X_val_final.reindex(columns=params_feat_fold.X_train_final.columns, fill_value=0)
+
+            modelo_fold = HistGradientBoostingRegressor(random_state=42)
+            modelo_fold.fit(params_feat_fold.X_train_final, np.log(y_tr))
+            pred_fold = np.exp(modelo_fold.predict(X_val_final))
+            score = mdape(y_val, pred_fold)
+            scores.append(score)
+            print(f'[repeat {repeat} fold {fold}] MdAPE: {score:.2f}% (train: {len(idx_train_fold)}, '
+                  f'val: {len(idx_val_fold)})')
+
+    scores = pd.Series(scores)
+    print(f'MdAPE CV ({n_splits}x{n_repeats}={len(scores)} folds): '
+          f'{scores.mean():.2f}% ± {scores.std():.2f}% '
+          f'(min {scores.min():.2f}%, max {scores.max():.2f}%)')
+    return scores
+
+
+resultados_cv = ejecutar_cv_repetida(deptos_df_limpio.loc[indice_train])
+
+# =======================================================================================
+# PASO 5b -- MODELO LINEAL LOG-LOG (pendiente)
+# =======================================================================================
+# La cabecera lo promete (línea 36) y nunca se implementó: hoy el único modelo del script es
+# HistGB. Importa por tres razones concretas, ninguna de ellas "porque estaba en el plan":
+#   1. PASO 4g rechazó PCA explícitamente para preservar la interpretabilidad de los coeficientes.
+#      Hoy no hay ningún modelo con coeficientes que preservar: el argumento está sin respaldo.
+#   2. Es la cota inferior honesta de complejidad. Si HistGB no le gana por un margen mayor al ruido
+#      medido en 5a, la ganancia no paga la opacidad.
+#   3. Los coeficientes son el chequeo de sanidad del feature engineering de PASO 4: un signo
+#      invertido (más baños -> menos precio) delata colinealidad residual o un bug de construcción
+#      que el modelo de árboles esconde sin avisar.
+#
+# Detalle de implementación:
+#   - Las superficies ya vienen log1p + escaladas de PASO 4d, así que regresar log(clp) contra ellas
+#     YA es la especificación log-log; no hay que volver a transformar nada. Al interpretar, ojo:
+#     el coeficiente está en unidades de desvío estándar de log(superficie), así que la elasticidad
+#     es beta / escalador_log.scale_[i], no beta.
+#   - Ridge, no OLS. PASO 4g toleró VIF residual de 10-14 por ser señal real y no identidad
+#     matemática, y hay 82 columnas con varios one-hot casi constantes: OLS devuelve coeficientes de
+#     varianza enorme y signo inestable. El alfa se elige con la CV de 5a.
+#   - PROBLEMA DE ESCALA A RESOLVER ANTES: 'target__barrio' se ajusta contra y_train en CLP (PASO 4b,
+#     línea ~1154) y NO se escala en PASO 4d. Entra al modelo en unidades de ~10^8 mientras el resto
+#     de las features tiene varianza 1. Para árboles da lo mismo; para Ridge no, porque la
+#     penalización es sensible a la escala y aplastaría esa columna -- que es una de las features más
+#     fuertes del dataset. Para el lineal hay que pasarla a log y estandarizarla (ajustando el
+#     escalador solo con train, como todo lo demás). Es un arreglo local al modelo lineal, no un
+#     cambio a PASO 4.
+#   - Interpretación de binarias: el efecto sobre el precio es exp(beta) - 1 (semi-elasticidad), no
+#     beta. Documentarlo junto a la tabla de coeficientes o se va a leer mal.
+#   - Evaluar en CLP (exp de la predicción), no en log, para que sea comparable con todo lo demás.
+#     Ojo con el sesgo de retransformación: E[exp(log y)] != exp(E[log y]). Para el ranking importa
+#     poco (el sesgo es multiplicativo y casi constante), pero si se reporta MAE en CLP hay que
+#     corregirlo (Duan smearing) o declararlo explícitamente.
+
+# =======================================================================================
+# PASO 5c -- TUNING DE HIPERPARÁMETROS (pendiente)
+# =======================================================================================
+# HistGB corre con defaults en todo el script. Estimación NO medida: 1-2 puntos de MdAPE
+# disponibles. Es la última optimización que conviene hacer, no la primera: mejora el número pero no
+# cambia lo que el proyecto puede responder, a diferencia de 5e.
+#
+#   - Búsqueda: RandomizedSearchCV o HalvingRandomSearchCV sobre learning_rate, max_leaf_nodes,
+#     min_samples_leaf, l2_regularization, max_features y max_bins. max_iter no se busca: se fija
+#     alto y se deja que early_stopping + validation_fraction lo corten.
+#   - Scorer: MdAPE en CLP, no el neg_MSE por defecto sobre log. El objetivo del negocio es el error
+#     porcentual mediano; optimizar MSE sobre log optimiza otra cosa (media geométrica) y pondera la
+#     cola de forma distinta. Se envuelve mdape() con make_scorer(greater_is_better=False) y se
+#     invierte el log DENTRO del scorer.
+#   - Solo sobre train, con la CV de 5a.
+#   - Criterio de parada: si la mejor combinación no le gana al default por más que el desvío entre
+#     folds, se queda el default. Menos superficie de mantenimiento por la misma métrica.
+
+# =======================================================================================
+# PASO 5d -- EVALUACIÓN FINAL EN TEST (pendiente)
+# =======================================================================================
+# Se corre UNA vez, cuando 5a-5c ya cerraron. Reportar el set completo de métricas, no solo MdAPE:
+#
+#   MdAPE   error porcentual mediano -- la métrica de negocio, robusta a outliers
+#   MAE     error absoluto medio en CLP -- cuánta plata, en promedio
+#   RMSE    penaliza la cola -- hoy RMSE ~ 2 x MAE, que delata errores grandes concentrados
+#   p10/p50/p90/p99 del residuo -- la forma completa del error, no su centro
+#
+# Por qué las cuatro: con MdAPE 8,39% y p99 de +80,8%, la mediana esconde por completo la cola. En
+# un negocio donde equivocarse por 300 millones de CLP es catastrófico, reportar solo la mediana es
+# engañoso.
+#
+# Desagregar por comuna y por decil de precio. Hipótesis a verificar (no medida): el error se
+# concentra en el decil superior, donde las casas son pocas, heterogéneas (vista, terreno,
+# arquitectura) y donde un mismo error porcentual cuesta mucha más plata. Si se confirma, la
+# conclusión de producto es acotar el alcance de la herramienta a un rango de precio, no promediar
+# sobre todo el inventario y aparentar una precisión que no se tiene donde más importa.
+#
+# Comparar siempre contra los dos pisos: el baseline de mediana precio/m² por barrio (21,50%) y el
+# lineal de 5b. Un modelo que no le gana a ambos no justifica su complejidad.
+
+# =======================================================================================
+# PASO 5e -- INTERVALOS DE PREDICCIÓN (CQR)
+# =======================================================================================
+# El problema, medido: con un umbral fijo de ±10% se flaggearía el 43% del inventario (20,6%
+# subvaluadas + 22,6% sobrevaluadas). El error del modelo (p10-p90: -15,8% a +20,1%) es del mismo
+# orden que el margen de negociación típico en Chile (5-10%). Un flag así no distingue "esta casa
+# está barata" de "el modelo no supo predecir esta casa", que es la única pregunta que el proyecto
+# necesita responder. Sin esto, todo lo que sigue es ruido ordenado.
+#
+# CQR (conformalized quantile regression, Romano et al. 2019) sobre las opciones descartadas:
+#   - Cuantiles sin calibrar (solo los tres HistGB) no dan garantía de cobertura, y los cuantiles
+#     pueden cruzarse (q05 > q95 en filas raras).
+#   - Conformal simple sobre el residuo absoluto da ancho CONSTANTE para todas las casas, que no
+#     sirve acá: la incertidumbre de una casa estándar en Las Condes y la de un terreno de 5.000 m²
+#     en Lo Barnechea no son comparables.
+# CQR combina ambas: ancho ADAPTATIVO de los cuantiles (se ensancha donde el modelo es malo) más
+# la garantía de cobertura marginal en muestra finita de conformal prediction, sin supuestos de
+# distribución del error.
+#
+# Split adicional DENTRO de train (80% ajuste / 20% calibración, mismo criterio 80/20 y
+# estratificado por 'comuna' que el resto del archivo): los tres modelos de cuantil se entrenan
+# SOLO con el fold de ajuste, y la corrección conformal se mide SOLO con el fold de calibración,
+# que ninguno de los tres vio en su fit -- si se calibrara con datos que el modelo ya vio, la
+# corrección subestimaría el error real fuera de muestra. Ninguno de los dos ve test.
+
+ALPHA_INTERVALO = 0.10  # cobertura nominal 90% (q05/q95)
+FRACCION_CALIBRACION = 0.2
+
+X_train_ajuste, X_train_calib, y_train_ajuste, y_train_calib = train_test_split(
+    X_train_final, y_train, test_size=FRACCION_CALIBRACION, stratify=X_train['comuna'], random_state=42,
+)
+print(f'Ajuste de cuantiles: {len(X_train_ajuste)} filas. Calibración conformal: {len(X_train_calib)} filas.')
+
+
+def entrenar_modelo_cuantil(quantile: float) -> HistGradientBoostingRegressor:
+    """Igual que el resto del archivo: se entrena sobre log(clp), no CLP directo (ver cabecera) --
+    los cuantiles son equivariantes ante transformaciones monótonas, así que exp(cuantil de
+    log(clp)) es el cuantil de clp."""
+    modelo = HistGradientBoostingRegressor(loss='quantile', quantile=quantile, random_state=42)
+    modelo.fit(X_train_ajuste, np.log(y_train_ajuste))
+    return modelo
+
+
+modelo_q05 = entrenar_modelo_cuantil(0.05)
+modelo_q50 = entrenar_modelo_cuantil(0.50)
+modelo_q95 = entrenar_modelo_cuantil(0.95)
+
+# Conformity score de CQR: cuánto se pasa cada casa de calibración fuera del intervalo crudo
+# [q05, q95] -- positivo si cae afuera (por cualquiera de los dos lados), negativo si cae adentro
+# con margen. Se mide en CLP (escala real), no en log, porque el intervalo final se reporta en CLP.
+
+q05_calib = np.exp(modelo_q05.predict(X_train_calib))
+q95_calib = np.exp(modelo_q95.predict(X_train_calib))
+conformity_scores = np.maximum(q05_calib - y_train_calib.to_numpy(), y_train_calib.to_numpy() - q95_calib)
+
+# Corrección conformal: cuantil (1-alpha)(1+1/n) de los conformity scores -- la corrección finita-
+# muestra de Romano et al., no simplemente el cuantil (1-alpha), para que la garantía de cobertura
+# valga con n_calib finito y no solo asintóticamente.
+
+n_calib = len(conformity_scores)
+nivel_ajustado = min(1.0, (1 - ALPHA_INTERVALO) * (1 + 1 / n_calib))
+correccion_conformal = np.quantile(conformity_scores, nivel_ajustado)
+print(f'Corrección conformal (n_calib={n_calib}, nivel={nivel_ajustado:.4f}): '
+      f'{correccion_conformal:,.0f} CLP')
+
+# Intervalo final sobre TEST (nunca visto por el ajuste de cuantiles ni por la calibración):
+# predicción cruda +- la corrección conformal, en CLP. Salvaguarda de orden: la corrección es
+# simétrica y no debería cruzar los cuantiles, pero si `correccion_conformal` sale negativa (la
+# calibración encontró que el intervalo crudo ya sobraba margen) un caso límite podría invertir
+# q05/q95 -- se fuerza el orden por seguridad, mismo criterio que el diseño original advertía para
+# cuantiles sin calibrar.
+
+q05_test = np.exp(modelo_q05.predict(X_test_final)) - correccion_conformal
+q50_test = np.exp(modelo_q50.predict(X_test_final))
+q95_test = np.exp(modelo_q95.predict(X_test_final)) + correccion_conformal
+q05_test, q95_test = np.minimum(q05_test, q95_test), np.maximum(q05_test, q95_test)
+
+# Validación obligatoria del intervalo:
+#   - Cobertura empírica: debe dar ~90%. Si da 70%, el intervalo miente y el ranking de PASO 5f
+#     construido sobre él también.
+#   - Ancho mediano como % del precio predicho: ESTE número es el resultado real del proyecto. Si
+#     el ancho mediano es ±25%, la conclusión honesta es que la herramienta solo puede señalar
+#     casos extremos -- es un hallazgo, no un fracaso, y hay que decirlo antes de que alguien
+#     decida una compra con ella.
+#   - Desagregada por comuna y por decil de precio: un intervalo con 90% global puede tener 60% en
+#     el decil caro, que es donde se toman las decisiones más caras.
+
+dentro_del_intervalo = (y_test.to_numpy() >= q05_test) & (y_test.to_numpy() <= q95_test)
+cobertura_empirica = dentro_del_intervalo.mean() * 100
+ancho_pct = (q95_test - q05_test) / q50_test * 100
+
+print(f'Cobertura empírica en test: {cobertura_empirica:.1f}% (nominal: {(1 - ALPHA_INTERVALO) * 100:.0f}%)')
+print(f'Ancho del intervalo (mediana): {np.median(ancho_pct):.1f}% del precio predicho '
+      f'(p25: {np.percentile(ancho_pct, 25):.1f}%, p75: {np.percentile(ancho_pct, 75):.1f}%)')
+
+intervalos_test = pd.DataFrame({
+    'comuna': X_test['comuna'].to_numpy(),
+    'q05': q05_test, 'q50': q50_test, 'q95': q95_test,
+    'dentro_del_intervalo': dentro_del_intervalo,
+    'ancho_pct': ancho_pct,
+}, index=X_test.index)
+
+print('Cobertura por comuna (%):')
+print((intervalos_test.groupby('comuna')['dentro_del_intervalo'].mean() * 100).round(1))
+
+intervalos_test['decil_precio'] = pd.qcut(intervalos_test['q50'], 10, labels=False, duplicates='drop')
+print('Cobertura por decil de precio predicho (0=más barato, 9=más caro) (%):')
+print((intervalos_test.groupby('decil_precio')['dentro_del_intervalo'].mean() * 100).round(1))
+
+# =======================================================================================
+# PASO 5f -- RESIDUO, REGLA DE FLAG Y RANKING
+# =======================================================================================
+# residuo = (precio real - predicho) / predicho, contra q50 (la predicción puntual). Es la
+# magnitud DESCRIPTIVA que va en el export -- va en 5h -- pero NO es la regla de decisión: dos
+# casas con el mismo residuo negativo pueden estar en lados opuestos del intervalo (una mal
+# predicha, con intervalo ancho, y sí puede ser normal; otra bien predicha, con intervalo angosto,
+# y el precio real igual se sale) -- ver PASO 5e.
+
+intervalos_test['precio_real'] = y_test.to_numpy()
+intervalos_test['residuo_pct'] = (
+    (intervalos_test['precio_real'] - intervalos_test['q50']) / intervalos_test['q50'] * 100
+)
+
+# Regla de flag: una casa se marca solo si su precio real cae FUERA del intervalo de 5e. Bajo q05
+# -> candidata a subvaluada; sobre q95 -> sobrevaluada. Nunca contra un umbral fijo -- es
+# precisamente lo que 5e vino a reemplazar.
+
+intervalos_test['flag'] = np.select(
+    [intervalos_test['precio_real'] < intervalos_test['q05'],
+     intervalos_test['precio_real'] > intervalos_test['q95']],
+    ['subvalorada', 'sobrevalorada'],
+    default='dentro_del_intervalo',
+)
+
+# Ranking: distancia relativa al borde del intervalo, (q05 - precio real) / predicho para
+# subvaloradas y (precio real - q95) / predicho para sobrevaloradas -- NO el residuo crudo.
+# Ordenar por residuo mezclaría de nuevo "barata" con "mal predicha", que es el error que 5e
+# corrige. Positivo y más grande = mejor candidata a subvaluada; negativo y más chico = más
+# sobrevalorada; cero = dentro del intervalo, sin rankear ("el modelo no encontró nada raro").
+# Ordenar de mayor a menor score da directamente "de mayor a menor descuento" (ver cabecera).
+
+distancia_bajo_q05 = (intervalos_test['q05'] - intervalos_test['precio_real']) / intervalos_test['q50'] * 100
+distancia_sobre_q95 = (intervalos_test['precio_real'] - intervalos_test['q95']) / intervalos_test['q50'] * 100
+intervalos_test['score_ranking'] = np.select(
+    [intervalos_test['flag'] == 'subvalorada', intervalos_test['flag'] == 'sobrevalorada'],
+    [distancia_bajo_q05, -distancia_sobre_q95],
+    default=0.0,
+)
+intervalos_test = intervalos_test.sort_values('score_ranking', ascending=False)
+
+# Calibración de expectativas: si el intervalo está bien calibrado, ~5% cae bajo q05 y ~5% sobre
+# q95 POR CONSTRUCCIÓN (alpha/2 cada lado). Un flag no es evidencia de ganga, es una candidata a
+# inspección -- el residuo negativo puede ser oportunidad real o un defecto que el modelo no
+# observa (sin vista, mala orientación, mal estado de conservación, problema legal, uso de suelo).
+# El ranking genera una lista de visitas, no una tasación.
+
+print(intervalos_test['flag'].value_counts())
+pct_subvalorada = (intervalos_test['flag'] == 'subvalorada').mean() * 100
+pct_sobrevalorada = (intervalos_test['flag'] == 'sobrevalorada').mean() * 100
+print(f'% subvaloradas: {pct_subvalorada:.1f}% (esperado ~{ALPHA_INTERVALO / 2 * 100:.1f}% por construcción)')
+print(f'% sobrevaloradas: {pct_sobrevalorada:.1f}% (esperado ~{ALPHA_INTERVALO / 2 * 100:.1f}% por construcción)')
+
+print('Top 10 candidatas subvaloradas (test):')
+print(intervalos_test.loc[intervalos_test['flag'] == 'subvalorada',
+                           ['comuna', 'precio_real', 'q05', 'q50', 'q95', 'residuo_pct', 'score_ranking']].head(10))
+
+# =======================================================================================
+# PASO 5g -- FILTROS DEL COMPRADOR SOBRE EL RANKING
+# =======================================================================================
+# Dormitorios y baños mínimos, comuna, presupuesto máximo, distancia máxima a un punto de interés.
+# Se aplican SOBRE el ranking ya construido en 5f, nunca como criterio de selección principal --
+# filtrar antes cambiaría la población y con ella los percentiles sobre los que se calculó el
+# intervalo (5e) y el ranking (5f).
+#
+# Reemplaza el filtro fijo original (precio UF < 15.000, Dormitorios >= 3): ese filtro no se ajusta
+# por comuna ni por superficie, y "barato" en Lo Barnechea y en Las Condes no es el mismo número --
+# que es exactamente lo que el modelo sí sabe y el filtro fijo tiraba a la basura.
+#
+# Todavía no hay un comprador real, así que los campos quedan como PLACEHOLDERS configurables --
+# todos en None por defecto (sin filtro). Se ajustan acá cuando exista un caso de uso concreto.
+
+
+@dataclass
+class FiltrosComprador:
+    dormitorios_min: int = None
+    banos_min: int = None
+    comunas: list = None  # None = todas; si no, lista de nombres tal como aparecen en 'comuna'
+    presupuesto_max_clp: float = None
+    distancia_max_m: float = None
+    punto_interes: str = None  # clave de PUNTOS_DE_INTERES (PASO 4e); requerido junto con distancia_max_m
+
+
+def aplicar_filtros_comprador(ranking: pd.DataFrame, X_crudo: pd.DataFrame,
+                               filtros: FiltrosComprador) -> pd.DataFrame:
+    """Filtra `ranking` (ya ordenado por score_ranking, ver PASO 5f) según las restricciones del
+    comprador -- nunca antes de rankear. `X_crudo` es el dataframe SIN codificar (X_test), para
+    leer Dormitorios/Baños/latitud/longitud tal como vienen, no las columnas escaladas de
+    X_test_final."""
+    mascara = pd.Series(True, index=ranking.index)
+
+    if filtros.dormitorios_min is not None:
+        mascara &= X_crudo.loc[ranking.index, 'Dormitorios'] >= filtros.dormitorios_min
+    if filtros.banos_min is not None:
+        mascara &= X_crudo.loc[ranking.index, 'Baños'] >= filtros.banos_min
+    if filtros.comunas is not None:
+        mascara &= ranking['comuna'].isin(filtros.comunas)
+    if filtros.presupuesto_max_clp is not None:
+        mascara &= ranking['precio_real'] <= filtros.presupuesto_max_clp
+    if filtros.distancia_max_m is not None:
+        if filtros.punto_interes not in PUNTOS_DE_INTERES:
+            raise ValueError(f"punto_interes debe ser uno de {list(PUNTOS_DE_INTERES)}, "
+                              f"no {filtros.punto_interes!r}")
+        lat_punto, lon_punto = PUNTOS_DE_INTERES[filtros.punto_interes]
+        distancia_m = haversine_m(X_crudo.loc[ranking.index, 'latitud'], X_crudo.loc[ranking.index, 'longitud'],
+                                   lat_punto, lon_punto)
+        mascara &= distancia_m <= filtros.distancia_max_m
+
+    return ranking.loc[mascara]
+
+
+filtros_comprador = FiltrosComprador()  # sin filtro por defecto -- ajustar acá según el comprador
+ranking_filtrado = aplicar_filtros_comprador(intervalos_test, X_test, filtros_comprador)
+print(f'Ranking sin filtros: {len(intervalos_test)} filas. Con filtros del comprador: {len(ranking_filtrado)} filas.')
+
+# =======================================================================================
+# PASO 5h -- EXPORT casas_candidatas.xlsx (pendiente)
+# =======================================================================================
+# Columnas mínimas: url, comuna, barrio, precio real (CLP y UF), predicho, q05, q95, ancho del
+# intervalo, residuo %, distancia al borde del intervalo, superficie total y útil, dormitorios,
+# baños, estacionamientos, antigüedad, latitud y longitud.
+#
+#   - Exportar valores CRUDOS, no las columnas de X_*_final: nadie puede leer "Superficie total =
+#     -0,42". Hay que conservar el índice para hacer join contra el dataframe previo a PASO 4.
+#   - Incluir el ancho del intervalo por fila: es lo que le dice al usuario cuánta confianza tiene
+#     cada línea del archivo.
+#   - Train vs test: las predicciones sobre train son in-sample y tienen residuos artificialmente
+#     chicos. O se exporta solo test, o se generan predicciones out-of-fold para train con la CV de
+#     5a. Mezclar ambas sin marcarlo produce un ranking donde las casas de train parecen
+#     sistemáticamente mejor tasadas de lo que están.
+#   - CLAUDE.md afirma hoy que este script produce casas_candidatas.xlsx. Es falso: el archivo no
+#     existe ni se genera. Corregir CLAUDE.md al implementar esto.
+
+# =======================================================================================
+# PASO 5i -- MAPA (pendiente)
+# =======================================================================================
+# Scatter geográfico coloreado de rojo (precio sobre q95, sobrevalorada) a verde (bajo q05,
+# subvalorada), con gris para todo lo que cae dentro del intervalo -- el gris es la mayoría y tiene
+# que verse como tal, si no el mapa exagera la cantidad de señal disponible.
+#
+#   - Las coordenadas ya están completas (99,98%) tras la corrección de PASO 2, así que no hace
+#     falta filtrar filas.
+#   - folium o plotly generan HTML interactivo, no PNG. gráficos/ hoy guarda solo PNG y está
+#     commiteado: decidir si el HTML entra al repo o va a .gitignore.
+#   - Tooltip con url, precio real, predicho e intervalo: sin la url el mapa no es accionable.
+
+# =======================================================================================
+# PASO 5j -- LÍMITES: QUÉ NO PUEDE RESPONDER ESTE MODELO
+# =======================================================================================
+# No son bugs ni pendientes, son techos del enfoque. Van escritos acá para que el ranking no se
+# sobre-interprete.
+#
+#   - EL TARGET ES PRECIO DE LISTA, NO DE TRANSACCIÓN. El modelo responde "¿esta casa pide más o
+#     menos que casas comparables que también están pidiendo?", no "¿vale más o menos de lo que
+#     pide?". Si todo el sector oriente está listado 12% sobre el precio de transacción real, el
+#     modelo absorbe ese 12% como media y no detecta nada: no hay ancla externa. El mayor salto de
+#     valor disponible es cruzar contra transacciones reales del CBR (Conservador de Bienes Raíces),
+#     que convierte esto de detector de listings anómalos en un AVM de verdad.
+#   - NO HAY DIMENSIÓN TEMPORAL. Verificado sobre los 77 campos del scrape crudo: no hay fecha de
+#     publicación, ni días en mercado, ni historial de precio. Días-en-mercado es la señal de
+#     sobreprecio por preferencia revelada más fuerte del dominio -- una casa 14 meses publicada sin
+#     vender está sobrevaluada, y eso es un hecho, no una predicción. Agregar fecha_publicacion al
+#     spider es un cambio chico y su valor es acumulativo: conviene empezar a acumular histórico
+#     cuanto antes, aunque el modelo todavía no lo use.
+#   - VARIABLES AUSENTES DEL SECTOR: vista, pendiente y exposición (determinantes en Lo Barnechea),
+#     calidad de terminaciones más allá de binarios, estado de conservación. Parte de eso vive en
+#     'descripcion', que PASO 4c midió y descartó (8,39% vs 8,40% con TF-IDF+SVD) -- revisable solo
+#     si cambia el modelo o si crece mucho el volumen de datos.
 

@@ -1,6 +1,6 @@
 # Estado del proyecto y trabajo pendiente
 
-Documento de traspaso. Última actualización: **2026-07-22**.
+Documento de traspaso. Última actualización: **2026-07-23**.
 
 Todo lo que dice "medido" acá se corrió de verdad contra `deptos.json` (5.603 avisos) en el venv
 del proyecto. Lo que no está medido dice explícitamente que es estimación.
@@ -9,39 +9,49 @@ del proyecto. Lo que no está medido dice explícitamente que es estimación.
 
 ## 1. Dónde quedó el proyecto
 
-`proyecto_deptos.py` (1.732 líneas) corre limpio de punta a punta. Pipeline completo:
+`proyecto_deptos.py` (2.207 líneas) corre limpio de punta a punta. Pipeline completo:
 
 ```
 PASO 1  Lectura de deptos.json
 PASO 2  Limpieza determinista + filtrado de filas
-PASO 2b SPLIT train/test  ← todo lo que aprende de los datos va DESPUÉS de acá
+PASO 2b SPLIT train/test + ajustar_imputacion()/aplicar_imputacion() (refit por fold, ver PASO 5a)
 PASO 3  Exploración (EDA) + deptos_limpios.xlsx
 PASO 4a Selección de columnas          4g Colinealidad (VIF, sin PCA)
 PASO 4b Codificación de categóricas    4h Baseline mediana precio/m² por barrio
-PASO 4c Validación de texto (rechazado) 4i Binaria de gastos comunes
+PASO 4c Validación de texto (rechazado) 4i Binaria gastos_comunes_informado
 PASO 4d Escalado numérico              4j Densidad local de oferta
 PASO 4e Features de distancia          4k Selección por importancia de permutación
-PASO 5  NO IMPLEMENTADO  ← ver sección 3
+PASO 5a CV repetida (HECHO, 2026-07-23) 5b-5j Modelo lineal/intervalos/ranking/export -- PENDIENTES
 ```
+
+Desde el 2026-07-23, PASO 2b-4j corren como pares `ajustar_*()`/`aplicar_*()` reusables (no solo
+código de una corrida), para que PASO 5a pueda reajustar TODO el preprocesamiento por fold de CV en
+vez de reusar los parámetros del split fijo 80/20. Ver sección 3, ítem P3 (resuelto).
 
 ### Números de referencia de la última corrida
 
-Sirven para detectar si un cambio futuro rompió algo.
+Sirven para detectar si un cambio futuro rompió algo. Verificado bit-a-bit contra la corrida previa
+al refactor de PASO 5a (mismo `deptos.json`, mismo `random_state`): estos números NO cambiaron.
 
 | Métrica | Valor |
 |---|---|
 | Filas tras limpieza | 5.284 (train 4.227 / test 1.057) |
 | Features finales | 82 |
-| MdAPE modelo (HistGB, test) | **8,39 %** |
+| MdAPE modelo (HistGB, split fijo 80/20) | **8,39 %** |
 | MdAPE baseline (mediana precio/m² por barrio) | 21,50 % |
+| MdAPE CV repetida (5 folds × 3 repeticiones, refit completo por fold) | **8,36 % ± 0,35 %** (min 7,77 %, max 8,87 %) |
 | MAE | 150.912.000 CLP |
 | RMSE | 295.966.827 CLP |
 | Residuo p10 / p50 / p90 | −15,8 % / −0,5 % / +20,1 % |
 
+El desvío de la CV (±0,35 pp) coincide con el rango ya medido variando la semilla del split fijo
+(8,15/8,29/8,51 %, rango 0,36 pp) -- señal de que el refit por fold funciona de verdad y no es un
+"teatro" que reusa parámetros fijos (si lo fuera, el desvío entre folds sería ~0).
+
 ### Nada está commiteado
 
-El último commit es `6ec308d`. Todo el trabajo de esta sesión está en el working tree sin commitear.
-Sin trackear: `.agents/`, `.claude/skills/`, `venv/` — evaluar si van a `.gitignore`.
+El último commit es `6ec308d`. Todo el trabajo de esta sesión y la anterior está en el working tree
+sin commitear. Sin trackear: `.agents/`, `.claude/skills/`, `venv/` — evaluar si van a `.gitignore`.
 
 ---
 
@@ -99,30 +109,43 @@ negociación típico en Chile (5-10 %) — señal ≈ ruido.
 o conformal prediction. Flagear una casa **solo si su precio real cae fuera del intervalo**, nunca
 contra un umbral fijo.
 
-### 🔴 P2 — Implementar PASO 5 (el entregable no existe)
+### 🔴 P2 — Implementar PASO 5b en adelante (modelamiento/producción, el entregable no existe)
 
-La cabecera lo describe (líneas 40-45) pero no hay código. Falta:
+PASO 5 ahora tiene un bloque de diseño completo (comentarios, sin código) en `proyecto_deptos.py`
+con sub-pasos 5a-5j. **5a (protocolo de evaluación) ya está implementado** -- ver P3 abajo. Falta
+el resto:
 
-1. Residuo `(precio real − predicho) / predicho` por casa
-2. Ranking por mayor descuento
-3. Filtros del comprador (dormitorios, baños) **sobre** el ranking, no como criterio principal
-4. Export `casas_candidatas.xlsx`
-5. Mapa coloreado rojo (sobrevalorada) → verde (subvalorada)
+1. 5b modelo lineal log-log, 5c tuning de hiperparámetros, 5d evaluación final en test
+2. 5e intervalos de predicción -- bloquea el objetivo de negocio (ver P1)
+3. 5f residuo `(precio real − predicho) / predicho` + ranking por distancia al borde del intervalo
+4. 5g filtros del comprador (dormitorios, baños) **sobre** el ranking, no como criterio principal
+5. 5h export `casas_candidatas.xlsx`, 5i mapa coloreado rojo (sobrevalorada) → verde (subvalorada)
 
 > `CLAUDE.md` afirma que el script produce `casas_candidatas.xlsx`. **Es falso hoy** — el archivo no
 > existe ni se genera. Corregir `CLAUDE.md` al implementar esto.
 
-### 🟠 P3 — Validación cruzada
+### ✅ P3 — Validación cruzada (protocolo resuelto 2026-07-23; feature selection con CV sigue pendiente)
 
-Hoy: una sola partición 80/20. Medido sobre 3 semillas, el mismo modelo da MdAPE de
-**8,15 % / 8,29 % / 8,51 %** — un rango de 0,36 puntos.
+**Resuelto:** PASO 2b-4j se refactorizaron a pares `ajustar_*()`/`aplicar_*()` (comuna/barrio/
+orientación por KDTree, `bad_ranges`, `allocate_values`, codificación categórica, 3 escaladores
+numéricos, distancias, ratios, densidad), y PASO 5a implementa `ejecutar_cv_repetida()`:
+`StratifiedKFold` por `comuna`, 5 folds × 3 repeticiones, cada fold reajusta TODO el pipeline con
+sus propios índices de train (no reusa los parámetros del split fijo 80/20). Medido: **8,36 % ±
+0,35 %** -- desvío del mismo orden que el 0,36 pp ya medido variando semilla, confirmando que el
+refit por fold funciona de verdad.
 
-Eso invalida la decisión de PASO 4k, cuya diferencia es de 0,20 puntos. **Prueba concreta:** el
-criterio ya se dio vuelta solo por arreglar la contaminación, sin tocar ninguna feature
-(antes "descarta 44 columnas", ahora "conserva las 82"). La decisión la tomaba el ruido.
+Alcance deliberadamente excluido de este refit (documentado en el propio código, PASO 5a):
+- PASO 4k (selección por importancia de permutación) NO se repite por fold -- cada fold usa las 82
+  columnas completas. Recalcularla por fold es nested-selection caro y no era el objetivo de esta
+  primera pasada.
+- PASO 4g (VIF/drop de 'Superficie útil') y PASO 4h (baseline) tampoco se recalculan por fold: son
+  reglas estructurales fijas o diagnóstico de un solo split.
 
-**Qué hacer:** `RepeatedKFold`; descartar una columna solo si su pérdida es consistente entre folds.
-Ya hay una advertencia escrita al final de PASO 4k.
+**Sigue pendiente** (la parte de P3 que todavía no se resuelve): usar esta CV para decidir
+features de verdad -- descartar una columna solo si su pérdida de importancia es consistente entre
+folds, reemplazando la comparación de un solo split que PASO 4k ya marcó como ruido (antes
+"descarta 44 columnas", ahora "conserva las 82" sin tocar ninguna feature). Requiere nested CV
+(selección de importancia dentro de cada fold externo) -- más caro que el protocolo de arriba.
 
 ### 🟠 P4 — Reportar MAE y RMSE, no solo MdAPE
 
@@ -143,14 +166,17 @@ lo estadístico pero está sin respaldo empírico.
 `HistGradientBoostingRegressor` corre con defaults, sin búsqueda. Estimación (no medida): 1-2 puntos
 de MdAPE disponibles.
 
-### 🟡 P7 — Corregir `tiene_gastos_comunes`
+### ✅ P7 — Corregir `tiene_gastos_comunes` (resuelto 2026-07-23)
 
-`Gastos comunes` nulo → `0` sobre 2.473 nulos (47 % de las filas). La binaria entonces no separa
-"paga gasto común" de "no paga", separa **"el corredor informó el dato"**. Mide comportamiento del
-publicador, no atributo de la casa.
+Renombrada a `gastos_comunes_informado` en PASO 4i (línea ~1582 de `proyecto_deptos.py`), que es lo
+que la columna mide de verdad (ver hallazgo original abajo). Se optó por renombrar en vez de
+eliminar: aunque su importancia por permutación medida es 0,000000 hoy, "el corredor no informó el
+dato" puede seguir siendo señal en otro modelo o con más datos, y el nombre ya no engaña sobre qué
+representa.
 
-Confirmado: importancia por permutación exactamente **0,000000**. Renombrar a
-`gastos_comunes_informado` (que es lo que mide) o eliminarla.
+Hallazgo original: `Gastos comunes` nulo → `0` sobre 2.473 nulos (47 % de las filas). La binaria
+entonces no separaba "paga gasto común" de "no paga", separaba "el corredor informó el dato". Medía
+comportamiento del publicador, no atributo de la casa.
 
 ---
 
@@ -217,6 +243,9 @@ al colegio *más cercano* de una lista, en vez de a un centroide inventado).
 ## 7. Arranque sugerido para la próxima sesión
 
 1. Commitear el trabajo actual (está todo sin commitear, ver sección 1).
-2. **P1 + P2 juntos** — son el objetivo de negocio y se complementan: los intervalos de predicción
-   son justamente lo que hace que el ranking de PASO 5 sea accionable en vez de ruido.
-3. Después P3 (`RepeatedKFold`), que vuelve defendible toda decisión posterior de features.
+2. **P1 + P2 (5e-5h) juntos** — son el objetivo de negocio y se complementan: los intervalos de
+   predicción son justamente lo que hace que el ranking de PASO 5f sea accionable en vez de ruido.
+   La CV de P3 (5a) ya está lista para usarse como protocolo de evaluación de cualquier modelo con
+   intervalos que se pruebe.
+3. La parte de P3 que sigue abierta (selección de features con CV, no solo el protocolo de
+   medición) puede esperar a después de P1+P2 -- no bloquea el objetivo de negocio.
