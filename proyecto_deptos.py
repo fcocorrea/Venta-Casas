@@ -2015,80 +2015,147 @@ def ejecutar_cv_repetida(universo: pd.DataFrame, n_splits: int = 5, n_repeats: i
 resultados_cv = ejecutar_cv_repetida(deptos_df_limpio.loc[indice_train])
 
 # =======================================================================================
-# PASO 5b -- MODELO LINEAL LOG-LOG (pendiente)
+# PASO 5b -- MODELO LINEAL LOG-LOG
 # =======================================================================================
-# La cabecera lo promete (línea 36) y nunca se implementó: hoy el único modelo del script es
-# HistGB. Importa por tres razones concretas, ninguna de ellas "porque estaba en el plan":
+# La cabecera lo promete (línea 36) y nunca se había implementado: hasta acá el único modelo del
+# script es HistGB. Importa por tres razones concretas:
 #   1. PASO 4g rechazó PCA explícitamente para preservar la interpretabilidad de los coeficientes.
-#      Hoy no hay ningún modelo con coeficientes que preservar: el argumento está sin respaldo.
+#      Sin este modelo no había ningún coeficiente que preservar: el argumento estaba sin respaldo.
 #   2. Es la cota inferior honesta de complejidad. Si HistGB no le gana por un margen mayor al ruido
-#      medido en 5a, la ganancia no paga la opacidad.
+#      medido en 5a (0,35 pp), la ganancia no paga la opacidad.
 #   3. Los coeficientes son el chequeo de sanidad del feature engineering de PASO 4: un signo
-#      invertido (más baños -> menos precio) delata colinealidad residual o un bug de construcción
-#      que el modelo de árboles esconde sin avisar.
+#      invertido (más baños -> menos precio) delataría colinealidad residual o un bug de
+#      construcción que el modelo de árboles esconde sin avisar.
 #
-# Detalle de implementación:
-#   - Las superficies ya vienen log1p + escaladas de PASO 4d, así que regresar log(clp) contra ellas
-#     YA es la especificación log-log; no hay que volver a transformar nada. Al interpretar, ojo:
-#     el coeficiente está en unidades de desvío estándar de log(superficie), así que la elasticidad
-#     es beta / escalador_log.scale_[i], no beta.
-#   - Ridge, no OLS. PASO 4g toleró VIF residual de 10-14 por ser señal real y no identidad
-#     matemática, y hay 82 columnas con varios one-hot casi constantes: OLS devuelve coeficientes de
-#     varianza enorme y signo inestable. El alfa se elige con la CV de 5a.
-#   - PROBLEMA DE ESCALA A RESOLVER ANTES: 'target__barrio' se ajusta contra y_train en CLP (PASO 4b,
-#     línea ~1154) y NO se escala en PASO 4d. Entra al modelo en unidades de ~10^8 mientras el resto
-#     de las features tiene varianza 1. Para árboles da lo mismo; para Ridge no, porque la
-#     penalización es sensible a la escala y aplastaría esa columna -- que es una de las features más
-#     fuertes del dataset. Para el lineal hay que pasarla a log y estandarizarla (ajustando el
-#     escalador solo con train, como todo lo demás). Es un arreglo local al modelo lineal, no un
-#     cambio a PASO 4.
-#   - Interpretación de binarias: el efecto sobre el precio es exp(beta) - 1 (semi-elasticidad), no
-#     beta. Documentarlo junto a la tabla de coeficientes o se va a leer mal.
-#   - Evaluar en CLP (exp de la predicción), no en log, para que sea comparable con todo lo demás.
-#     Ojo con el sesgo de retransformación: E[exp(log y)] != exp(E[log y]). Para el ranking importa
-#     poco (el sesgo es multiplicativo y casi constante), pero si se reporta MAE en CLP hay que
-#     corregirlo (Duan smearing) o declararlo explícitamente.
+# Las superficies ya vienen log1p + escaladas de PASO 4d, así que regresar log(clp) contra ellas
+# YA es la especificación log-log -- no hace falta transformar nada más. Ridge, no OLS: PASO 4g
+# toleró VIF residual de 10-14 por ser señal real (no identidad matemática), y hay 82 columnas con
+# varios one-hot casi constantes -- OLS daría coeficientes de varianza enorme y signo inestable.
+#
+# PROBLEMA DE ESCALA resuelto acá, LOCAL al modelo lineal (no cambia PASO 4): 'target__barrio' se
+# ajusta contra y_train en CLP (PASO 4b) y no se escala en PASO 4d -- entra en unidades ~10^8
+# mientras el resto tiene varianza 1. Para árboles da lo mismo; para Ridge la penalización es
+# sensible a la escala y aplastaría esta columna, una de las más fuertes del dataset. Se pasa a
+# log1p + se estandariza, ajustando el escalador SOLO con train.
+
+from sklearn.linear_model import RidgeCV
+from sklearn.metrics import make_scorer
+
+
+def mdape_desde_log(y_true_log, y_pred_log) -> float:
+    """mdape() opera en CLP -- los scorers de sklearn reciben y en la escala que se les pasó a
+    .fit() (log(clp), igual que el resto del archivo), así que hay que exponenciar antes."""
+    return mdape(np.exp(y_true_log), np.exp(y_pred_log))
+
+
+scorer_mdape = make_scorer(mdape_desde_log, greater_is_better=False)
+COLUMNA_BARRIO_CODIFICADA = 'target__barrio'
+
+
+def preparar_features_lineal(X_final: pd.DataFrame, escalador_barrio: StandardScaler = None):
+    X_final = X_final.copy()
+    valores_log = np.log1p(X_final[[COLUMNA_BARRIO_CODIFICADA]])
+    if escalador_barrio is None:
+        escalador_barrio = StandardScaler()
+        X_final[[COLUMNA_BARRIO_CODIFICADA]] = escalador_barrio.fit_transform(valores_log)
+    else:
+        X_final[[COLUMNA_BARRIO_CODIFICADA]] = escalador_barrio.transform(valores_log)
+    return X_final, escalador_barrio
+
+
+X_train_final_lineal, escalador_barrio_lineal = preparar_features_lineal(X_train_final)
+X_test_final_lineal, _ = preparar_features_lineal(X_test_final, escalador_barrio_lineal)
+
+# Alfa elegido con CV barata sobre train (KFold plano sobre X_train_final_lineal, sin reajustar
+# imputación/encoders por fold) -- mismo criterio "(b)" que el diseño original de PASO 5a ya
+# planteaba como aceptable para comparar hiperparámetros/modelos ENTRE SÍ, no para reportar el
+# error esperado (eso sigue siendo trabajo de la CV completa de 5a / la evaluación de 5d).
+
+alfas_candidatos = [0.1, 1.0, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0]
+modelo_lineal = RidgeCV(alphas=alfas_candidatos, scoring=scorer_mdape, cv=5)
+modelo_lineal.fit(X_train_final_lineal, np.log(y_train))
+print(f'Ridge log-log: alfa elegido por CV = {modelo_lineal.alpha_}')
+
+prediccion_lineal_test = np.exp(modelo_lineal.predict(X_test_final_lineal))
+mdape_lineal = mdape(y_test, prediccion_lineal_test)
+print(f'MdAPE modelo lineal (Ridge log-log, test): {mdape_lineal:.2f}%')
+print(f'Diferencia vs. baseline: {mdape_baseline - mdape_lineal:.2f} puntos porcentuales.')
+
+# Tabla de coeficientes -- chequeo de sanidad, no un análisis definitivo. Elasticidad solo para
+# 'Superficie total' (la variable hedónica central del archivo, ver cabecera): coef / scale_ del
+# escalador de PASO 4d, no el coef crudo -- el coef está en unidades de desvío estándar de
+# log(superficie), no de log(superficie) directamente. Semi-elasticidad (exp(coef)-1) para las
+# binarias: el efecto de "tener" un amenity no es el coeficiente crudo tampoco.
+
+coeficientes = pd.Series(modelo_lineal.coef_, index=X_train_final_lineal.columns)
+idx_superficie_total = columnas_log_scale.index('remainder__Superficie total')
+escala_superficie_total = params_escalado.escalador_log.scale_[idx_superficie_total]
+elasticidad_superficie_total = coeficientes['remainder__Superficie total'] / escala_superficie_total
+print(f"Elasticidad precio-superficie total: {elasticidad_superficie_total:.3f} "
+      f"(1% más de superficie -> {elasticidad_superficie_total:.2f}% más de precio, "
+      f"manteniendo todo lo demás fijo).")
+
+top_positivos = coeficientes.sort_values(ascending=False).head(10)
+top_negativos = coeficientes.sort_values().head(10)
+print('Top 10 coeficientes positivos (suben el precio):')
+print(top_positivos)
+print('Top 10 coeficientes negativos (bajan el precio):')
+print(top_negativos)
 
 # =======================================================================================
-# PASO 5c -- TUNING DE HIPERPARÁMETROS (pendiente)
+# PASO 5c -- TUNING DE HIPERPARÁMETROS
 # =======================================================================================
-# HistGB corre con defaults en todo el script. Estimación NO medida: 1-2 puntos de MdAPE
-# disponibles. Es la última optimización que conviene hacer, no la primera: mejora el número pero no
-# cambia lo que el proyecto puede responder, a diferencia de 5e.
+# HistGB corría con defaults en todo el archivo. Es la última optimización que conviene hacer, no
+# la primera: mejora el número pero no cambia lo que el proyecto puede responder, a diferencia de
+# 5e -- por eso se hace acá, después del modelo lineal, no antes.
 #
-#   - Búsqueda: RandomizedSearchCV o HalvingRandomSearchCV sobre learning_rate, max_leaf_nodes,
-#     min_samples_leaf, l2_regularization, max_features y max_bins. max_iter no se busca: se fija
-#     alto y se deja que early_stopping + validation_fraction lo corten.
-#   - Scorer: MdAPE en CLP, no el neg_MSE por defecto sobre log. El objetivo del negocio es el error
-#     porcentual mediano; optimizar MSE sobre log optimiza otra cosa (media geométrica) y pondera la
-#     cola de forma distinta. Se envuelve mdape() con make_scorer(greater_is_better=False) y se
-#     invierte el log DENTRO del scorer.
-#   - Solo sobre train, con la CV de 5a.
-#   - Criterio de parada: si la mejor combinación no le gana al default por más que el desvío entre
-#     folds, se queda el default. Menos superficie de mantenimiento por la misma métrica.
+# Scorer: MdAPE en CLP (mismo `scorer_mdape` de 5b), no el neg_MSE por defecto sobre log -- el
+# objetivo de negocio es el error porcentual mediano, y optimizar MSE sobre log optimiza otra cosa
+# (media geométrica) con otra ponderación de la cola. CV barata (mismo criterio "(b)" de 5b): sirve
+# para comparar hiperparámetros entre sí, no para reportar el error esperado.
 
-# =======================================================================================
-# PASO 5d -- EVALUACIÓN FINAL EN TEST (pendiente)
-# =======================================================================================
-# Se corre UNA vez, cuando 5a-5c ya cerraron. Reportar el set completo de métricas, no solo MdAPE:
-#
-#   MdAPE   error porcentual mediano -- la métrica de negocio, robusta a outliers
-#   MAE     error absoluto medio en CLP -- cuánta plata, en promedio
-#   RMSE    penaliza la cola -- hoy RMSE ~ 2 x MAE, que delata errores grandes concentrados
-#   p10/p50/p90/p99 del residuo -- la forma completa del error, no su centro
-#
-# Por qué las cuatro: con MdAPE 8,39% y p99 de +80,8%, la mediana esconde por completo la cola. En
-# un negocio donde equivocarse por 300 millones de CLP es catastrófico, reportar solo la mediana es
-# engañoso.
-#
-# Desagregar por comuna y por decil de precio. Hipótesis a verificar (no medida): el error se
-# concentra en el decil superior, donde las casas son pocas, heterogéneas (vista, terreno,
-# arquitectura) y donde un mismo error porcentual cuesta mucha más plata. Si se confirma, la
-# conclusión de producto es acotar el alcance de la herramienta a un rango de precio, no promediar
-# sobre todo el inventario y aparentar una precisión que no se tiene donde más importa.
-#
-# Comparar siempre contra los dos pisos: el baseline de mediana precio/m² por barrio (21,50%) y el
-# lineal de 5b. Un modelo que no le gana a ambos no justifica su complejidad.
+from sklearn.model_selection import RandomizedSearchCV, KFold, cross_val_score
+
+cv_barata = KFold(n_splits=5, shuffle=True, random_state=42)
+
+distribucion_hiperparametros = {
+    'learning_rate': [0.01, 0.03, 0.05, 0.1, 0.2],
+    'max_leaf_nodes': [15, 31, 63, 127],
+    'min_samples_leaf': [10, 20, 30, 50, 80],
+    'l2_regularization': [0.0, 0.1, 1.0, 10.0],
+    'max_features': [0.5, 0.7, 0.9, 1.0],
+    'max_bins': [128, 255],
+}
+
+busqueda_hiperparametros = RandomizedSearchCV(
+    HistGradientBoostingRegressor(random_state=42),
+    param_distributions=distribucion_hiperparametros,
+    n_iter=20, cv=cv_barata, scoring=scorer_mdape, random_state=42, n_jobs=-1,
+)
+busqueda_hiperparametros.fit(X_train_final, np.log(y_train))
+mdape_tuned_cv = -busqueda_hiperparametros.best_score_
+
+mdape_default_cv = -np.mean(cross_val_score(
+    HistGradientBoostingRegressor(random_state=42), X_train_final, np.log(y_train),
+    cv=cv_barata, scoring=scorer_mdape))
+
+print(f'MdAPE CV barata -- default: {mdape_default_cv:.2f}%. '
+      f'Tuned: {mdape_tuned_cv:.2f}% ({busqueda_hiperparametros.best_params_}).')
+
+# Criterio de parada: mismo umbral que ya midió PASO 5a variando la semilla (0,35 pp) -- si el
+# tuning no supera ese ruido, no hay evidencia de que sea una mejora real y no una casualidad de la
+# búsqueda. Documentado, no aplicado automáticamente al pipeline (modelo_q05/q50/q95 de PASO 5e
+# siguen con defaults): adoptar hiperparámetros tuned para las intervalos de cuantil requeriría
+# repetir esta búsqueda con pinball loss, no MdAPE -- un objetivo distinto que loss='quantile' ya
+# optimiza de por sí. Ver PENDIENTES.md.
+
+RUIDO_CV_PASO_5A = 0.35
+if mdape_default_cv - mdape_tuned_cv > RUIDO_CV_PASO_5A:
+    print(f'Tuning mejora más que el ruido medido en 5a ({RUIDO_CV_PASO_5A} pp): '
+          f'considerar adoptar {busqueda_hiperparametros.best_params_} en producción.')
+else:
+    print(f'Tuning NO mejora más que el ruido medido en 5a ({RUIDO_CV_PASO_5A} pp): '
+          f'se mantienen los defaults, coincide con la estimación original de PASO 5c.')
 
 # =======================================================================================
 # PASO 5e -- INTERVALOS DE PREDICCIÓN (CQR)
@@ -2198,6 +2265,54 @@ print((intervalos_test.groupby('comuna')['dentro_del_intervalo'].mean() * 100).r
 intervalos_test['decil_precio'] = pd.qcut(intervalos_test['q50'], 10, labels=False, duplicates='drop')
 print('Cobertura por decil de precio predicho (0=más barato, 9=más caro) (%):')
 print((intervalos_test.groupby('decil_precio')['dentro_del_intervalo'].mean() * 100).round(1))
+
+# =======================================================================================
+# PASO 5d -- EVALUACIÓN FINAL EN TEST
+# =======================================================================================
+# Se corre acá, DESPUÉS de 5e y no antes como en el blueprint original: evalúa `modelo_q50`, el
+# mismo modelo cuyo precio predicho ya usan el ranking/export/mapa de 5f-5i -- evaluarlo antes de
+# que exista hubiera significado entrenar un cuarto modelo solo para este reporte, o duplicar el
+# fit. Reordenar el CÓDIGO no cambia el orden conceptual del diseño (5d sigue siendo "la
+# evaluación final", solo que ahora referencia al modelo que 5e ya construyó).
+#
+# Reportar el set completo de métricas, no solo MdAPE: MAE (cuánta plata, en promedio), RMSE
+# (penaliza la cola -- si RMSE >> MAE, delata errores grandes concentrados) y los percentiles del
+# residuo (la forma completa del error, no solo su centro). Con solo la mediana, un p99 grande
+# queda invisible -- en un negocio donde equivocarse por cientos de millones de CLP es
+# catastrófico, reportar solo MdAPE es engañoso.
+
+residuo_test_pct = (y_test.to_numpy() - q50_test) / q50_test * 100
+error_absoluto_pct = np.abs((y_test.to_numpy() - q50_test) / y_test.to_numpy()) * 100  # mismo criterio que mdape()
+mae_test = np.mean(np.abs(y_test.to_numpy() - q50_test))
+rmse_test = np.sqrt(np.mean((y_test.to_numpy() - q50_test) ** 2))
+p10, p50, p90, p99 = np.percentile(residuo_test_pct, [10, 50, 90, 99])
+
+print('=== PASO 5d: evaluación final en test ===')
+print(f'MdAPE: {mdape(y_test, q50_test):.2f}%')
+print(f'MAE: {mae_test:,.0f} CLP')
+print(f'RMSE: {rmse_test:,.0f} CLP (RMSE/MAE = {rmse_test / mae_test:.2f})')
+print(f'Residuo (precio real - predicho)/predicho -- p10/p50/p90/p99: '
+      f'{p10:.1f}% / {p50:.1f}% / {p90:.1f}% / {p99:.1f}%')
+
+# Comparación contra los dos pisos obligatorios (ver PASO 5): el baseline de mediana precio/m² por
+# barrio y el lineal de 5b. Un modelo que no le gana a ambos no justifica su complejidad.
+print(f'Comparación de MdAPE -- baseline: {mdape_baseline:.2f}%. '
+      f'Lineal (Ridge log-log): {mdape_lineal:.2f}%. HistGB (modelo_q50): {mdape(y_test, q50_test):.2f}%.')
+
+# Desagregado por comuna y por decil de precio (reusa 'decil_precio', ya calculado arriba en 5e).
+# Hipótesis a verificar: el error se concentra en el decil superior, donde las casas son pocas,
+# heterogéneas (vista, terreno, arquitectura) y un mismo error porcentual cuesta mucha más plata.
+
+error_por_grupo = pd.DataFrame({
+    'comuna': X_test['comuna'].to_numpy(),
+    'decil_precio': intervalos_test['decil_precio'].to_numpy(),
+    'error_absoluto_pct': error_absoluto_pct,
+}, index=X_test.index)
+
+print('MdAPE por comuna (%):')
+print(error_por_grupo.groupby('comuna')['error_absoluto_pct'].median().round(2))
+print('MdAPE por decil de precio predicho (0=más barato, 9=más caro) (%):')
+print(error_por_grupo.groupby('decil_precio')['error_absoluto_pct'].median().round(2))
 
 # =======================================================================================
 # PASO 5f -- RESIDUO, REGLA DE FLAG Y RANKING

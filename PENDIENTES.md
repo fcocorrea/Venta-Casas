@@ -21,32 +21,45 @@ PASO 4b Codificación de categóricas    4h Baseline mediana precio/m² por barr
 PASO 4c Validación de texto (rechazado) 4i Binaria gastos_comunes_informado
 PASO 4d Escalado numérico              4j Densidad local de oferta
 PASO 4e Features de distancia          4k Selección por importancia de permutación
-PASO 5a CV repetida (HECHO, 2026-07-23) 5b-5j Modelo lineal/intervalos/ranking/export -- PENDIENTES
+PASO 5  a-i HECHOS (2026-07-23) -- CV, lineal, tuning, evaluación final, intervalos, ranking,
+        export, mapa. Solo 5j (límites, ya documentado como comentario) es puramente descriptivo.
 ```
 
 Desde el 2026-07-23, PASO 2b-4j corren como pares `ajustar_*()`/`aplicar_*()` reusables (no solo
 código de una corrida), para que PASO 5a pueda reajustar TODO el preprocesamiento por fold de CV en
-vez de reusar los parámetros del split fijo 80/20. Ver sección 3, ítem P3 (resuelto).
+vez de reusar los parámetros del split fijo 80/20. Ver sección 3, ítem P3 (resuelto). El script
+ahora entrena tres modelos (HistGB por defecto, HistGB tuned -- solo diagnóstico, no en producción
+--, y Ridge log-log) más los tres de cuantil de PASO 5e; `requirements.txt` congela el venv.
 
 ### Números de referencia de la última corrida
 
-Sirven para detectar si un cambio futuro rompió algo. Verificado bit-a-bit contra la corrida previa
-al refactor de PASO 5a (mismo `deptos.json`, mismo `random_state`): estos números NO cambiaron.
+Sirven para detectar si un cambio futuro rompió algo. Los de imputación/features (filas, columnas,
+MdAPE CV) están verificados bit-a-bit contra la corrida previa al refactor de PASO 5a. Los de
+MAE/RMSE/residuo son de PASO 5d (implementado 2026-07-23, primera vez que se miden con código
+persistente en el repo -- los que aparecían acá antes eran de un cálculo ad hoc de la sesión
+anterior, nunca commiteado).
 
 | Métrica | Valor |
 |---|---|
 | Filas tras limpieza | 5.284 (train 4.227 / test 1.057) |
 | Features finales | 82 |
-| MdAPE modelo (HistGB, split fijo 80/20) | **8,39 %** |
+| MdAPE modelo (HistGB, split fijo 80/20) | **8,39 %** (PASO 4c) / **8,61 %** (PASO 5d, `modelo_q50`) |
 | MdAPE baseline (mediana precio/m² por barrio) | 21,50 % |
+| MdAPE lineal (Ridge log-log, PASO 5b) | 12,15 % |
+| MdAPE HistGB tuned (PASO 5c, CV barata, NO en producción) | 7,84 % (default: 8,54 %) |
 | MdAPE CV repetida (5 folds × 3 repeticiones, refit completo por fold) | **8,36 % ± 0,35 %** (min 7,77 %, max 8,87 %) |
-| MAE | 150.912.000 CLP |
-| RMSE | 295.966.827 CLP |
-| Residuo p10 / p50 / p90 | −15,8 % / −0,5 % / +20,1 % |
+| MAE (PASO 5d) | 162.688.857 CLP |
+| RMSE (PASO 5d) | 319.759.311 CLP (RMSE/MAE = 1,97) |
+| Residuo p10 / p50 / p90 / p99 (PASO 5d) | −16,5 % / −0,5 % / +22,7 % / **+71,8 %** |
+| MdAPE por decil de precio (PASO 5d) | 8,4 % en baratos -> **13,6 %** (decil 8) -> **18,5 %** (decil 9) |
+| Cobertura del intervalo (PASO 5e) | 91,7 % global, 85,8 % en deciles 8-9 |
 
 El desvío de la CV (±0,35 pp) coincide con el rango ya medido variando la semilla del split fijo
 (8,15/8,29/8,51 %, rango 0,36 pp) -- señal de que el refit por fold funciona de verdad y no es un
 "teatro" que reusa parámetros fijos (si lo fuera, el desvío entre folds sería ~0).
+
+Dos métricas independientes (MdAPE por decil de PASO 5d y cobertura por decil de PASO 5e) apuntan
+al mismo punto débil: el modelo es notablemente menos confiable en el segmento de precio alto.
 
 ### Nada está commiteado
 
@@ -96,8 +109,6 @@ filas cierre antes del split**.
 ---
 
 ## 3. Pendiente, por prioridad
-
-### 🔴 P1 — Intervalos de predicción (bloquea el objetivo de negocio)
 
 ### ✅ P1 — Intervalos de predicción (resuelto 2026-07-23)
 
@@ -156,24 +167,48 @@ folds, reemplazando la comparación de un solo split que PASO 4k ya marcó como 
 "descarta 44 columnas", ahora "conserva las 82" sin tocar ninguna feature). Requiere nested CV
 (selección de importancia dentro de cada fold externo) -- más caro que el protocolo de arriba.
 
-### 🟠 P4 — Reportar MAE y RMSE, no solo MdAPE
+### ✅ P4 — MAE y RMSE reportados (resuelto 2026-07-23, PASO 5d)
 
-`RMSE ≈ 2 × MAE` delata una cola de errores grandes que la mediana esconde por completo
-(residuo p99: **+80,8 %**). Para un negocio donde equivocarse 300M CLP es catastrófico, reportar
-solo la mediana es engañoso.
+PASO 5d consolida la evaluación final sobre test (después de PASO 5e, reusa `modelo_q50`): MdAPE
+8,61 %, **MAE 162.688.857 CLP**, **RMSE 319.759.311 CLP** (RMSE/MAE = 1,97 -- confirma la cola de
+errores grandes que la mediana escondía). Residuo p10/p50/p90/**p99: +71,8 %**.
 
-### 🟡 P5 — Entrenar el modelo lineal log-log
+**Hallazgo confirmado** (era hipótesis, ahora está medido): el error se concentra en el decil de
+precio más caro. MdAPE por decil: 8,4 % en los baratos, **13,6 % en el decil 8, 18,5 % en el decil
+9** -- más del doble del error global (8,61 %) justo donde un mismo % de error cuesta más plata.
+Conclusión de producto: la herramienta es notablemente menos confiable en el segmento alto, y eso
+ya se veía también en la cobertura del intervalo de PASO 5e (85,8 % en esos mismos deciles, contra
+90 % nominal). Dos métricas distintas señalando el mismo punto débil.
 
-La cabecera lo promete (línea 36) y nunca se implementó. Solo existe `HistGradientBoostingRegressor`.
+### ✅ P5 — Modelo lineal log-log entrenado (resuelto 2026-07-23, PASO 5b)
 
-Importa además porque **se rechazó PCA argumentando preservar la interpretabilidad de los
-coeficientes** (PASO 4g) — y hoy no hay ningún modelo con coeficientes. El argumento es correcto en
-lo estadístico pero está sin respaldo empírico.
+Ridge (alfa elegido por CV: 100.0) sobre X_train_final con 'target__barrio' relogueada/escalada
+(arreglo local, ver código). MdAPE test: **12,15 %** -- le gana claro al baseline (21,50 %) pero
+pierde claro contra HistGB (8,61 %, 3,5 pp de diferencia, muy por sobre el ruido de 0,35 pp de
+PASO 5a) -- la complejidad del árbol se justifica.
 
-### 🟡 P6 — Tuning de hiperparámetros
+**Elasticidad precio-superficie total medida: 0,068** (1 % más de superficie -> 0,07 % más de
+precio). Sospechosamente baja para una elasticidad hedónica -- lectura más probable: colinealidad
+residual entre Superficie total/Dormitorios/Baños (VIF 10-14, tolerado en PASO 4g) diluye el
+coeficiente individual de Ridge entre variables correlacionadas. No se puede leer como "la
+superficie casi no le importa al precio" sin ese matiz -- es una limitación de interpretación del
+modelo lineal con estas features, no un hallazgo de mercado.
 
-`HistGradientBoostingRegressor` corre con defaults, sin búsqueda. Estimación (no medida): 1-2 puntos
-de MdAPE disponibles.
+### ✅ P6 — Tuning de hiperparámetros (resuelto 2026-07-23, PASO 5c)
+
+`RandomizedSearchCV` (20 combinaciones, CV barata de 5 folds sin reajustar preprocesamiento --
+mismo criterio "(b)" que el diseño original de PASO 5a ya autorizaba para comparar modelos entre
+sí). Medido: MdAPE CV -- default 8,54 %, tuned **7,84 %** (mejora de 0,70 pp, **supera el ruido de
+0,35 pp** medido en 5a -- a diferencia de la estimación original de "1-2 puntos, no medido", esto
+sí está medido y sí es una mejora real, no ruido).
+
+Mejores hiperparámetros encontrados: `min_samples_leaf=10, max_leaf_nodes=127, max_features=0.9,
+max_bins=128, learning_rate=0.1, l2_regularization=1.0`.
+
+**No aplicado automáticamente al pipeline** (`modelo_q05`/`q50`/`q95` de PASO 5e siguen con
+defaults) -- adoptar estos hiperparámetros para los modelos de cuantil requeriría repetir la
+búsqueda con pinball loss, no MdAPE (un objetivo distinto que `loss='quantile'` ya optimiza de por
+sí). Queda como recomendación documentada, no como cambio de producción.
 
 ### ✅ P7 — Corregir `tiene_gastos_comunes` (resuelto 2026-07-23)
 
@@ -232,7 +267,8 @@ al colegio *más cercano* de una lista, en vez de a un centroide inventado).
   `python -c "import nltk; nltk.download('stopwords')"`), y `folium` (esta sesión, para PASO 5i).
 - `TargetEncoder` emite un `FutureWarning` por `random_state` (deprecado en sklearn 1.9, se elimina
   en 1.11). Inofensivo hoy; migrar a pasar un `cv` cuando moleste.
-- No hay `requirements.txt`. Valdría la pena congelar el venv.
+- `requirements.txt` congelado (2026-07-23, `pip freeze`). Reinstalar con
+  `./venv/Scripts/python.exe -m pip install -r requirements.txt` si se recrea el venv.
 
 ---
 
@@ -251,12 +287,21 @@ al colegio *más cercano* de una lista, en vez de a un centroide inventado).
 
 ## 7. Arranque sugerido para la próxima sesión
 
-P1, P2 (5e-5i) y P3 (protocolo de CV) ya están resueltos -- el entregable de negocio (ranking con
-intervalos, export y mapa) existe y corre de punta a punta. Lo que sigue, sin bloquear nada:
+P1-P7 están todos resueltos. El entregable de negocio (ranking con intervalos, export y mapa)
+existe y corre de punta a punta; PASO 5 completo hasta 5i; `requirements.txt` congelado. Lo que
+queda es refinamiento, ninguno bloquea nada:
 
-1. **5b-5d** (lineal log-log, tuning, evaluación final) -- mejoran el número y dan un chequeo de
-   sanidad de coeficientes, pero el sistema ya es accionable sin ellos.
-2. La parte de P3 que sigue abierta (selección de features CON la CV, no solo el protocolo de
+1. **Decidir sobre el tuning de 5c**: adoptar `min_samples_leaf=10, max_leaf_nodes=127,
+   max_features=0.9, max_bins=128, learning_rate=0.1, l2_regularization=1.0` en `modelo_q05`/`q50`/
+   `q95` de PASO 5e (mejora medida 0,70 pp, supera el ruido) -- pero repetir la búsqueda con
+   pinball loss en vez de MdAPE, porque esos tres modelos optimizan `loss='quantile'`, no el
+   objetivo que se tuneó acá.
+2. **Segmentar por precio** (sugerido por P4/P5d y por la cobertura de PASO 5e, dos métricas
+   independientes apuntando a lo mismo): el error casi se duplica en los dos deciles más caros. Un
+   modelo separado para el segmento alto, o simplemente declarar el rango de precio donde la
+   herramienta es confiable, es la conclusión de producto más accionable de toda la sesión.
+3. La parte de P3 que sigue abierta (selección de features CON la CV, no solo el protocolo de
    medición) -- reemplazar la decisión de un solo split de PASO 4k.
-3. Congelar el venv (`pip freeze`) -- ya son dos dependencias nuevas esta sesión (`openpyxl`,
-   `folium`) sin `requirements.txt` que las registre (ver sección 5).
+4. Revisar la elasticidad precio-superficie de PASO 5b (0,068, sospechosamente baja) si en algún
+   momento se necesita un número hedónico defendible -- hoy está diluida por colinealidad, no
+   corregida (ver P5).
