@@ -2382,7 +2382,14 @@ print(f'{CASAS_CANDIDATAS_XLSX}: {len(casas_candidatas)} filas exportadas '
 import folium
 
 MAPA_HTML = os.path.join(GRAFICOS_DIR, 'mapa_intervalos.html')
-COLOR_POR_FLAG = {'dentro_del_intervalo': 'gray', 'subvalorada': 'green', 'sobrevalorada': 'red'}
+
+
+def color_por_residuo(precio_real: float, q50: float) -> str:
+    """Rojo si el precio real está sobre la predicción puntual (sobrevalorada respecto a q50),
+    verde si está bajo (subvalorada). A pedido explícito: sin gris -- toda casa se clasifica, no
+    solo las que caen fuera del intervalo de 5e."""
+    return 'red' if precio_real >= q50 else 'green'
+
 
 mapa_datos = ranking_filtrado.join(X_test[['latitud', 'longitud']])
 mapa_datos = mapa_datos.join(deptos_df.loc[mapa_datos.index, ['url']])
@@ -2391,7 +2398,11 @@ mapa = folium.Map(location=[mapa_datos['latitud'].mean(), mapa_datos['longitud']
                    zoom_start=12, tiles='OpenStreetMap')
 
 for _, fila in mapa_datos.iterrows():
-    es_gris = fila['flag'] == 'dentro_del_intervalo'
+    # El color ya no distingue flaggeada/no-flaggeada (ver color_por_residuo) -- esa distinción se
+    # conserva en el tamaño/opacidad: las flaggeadas (fuera del intervalo de 5e) se ven más grandes
+    # y sólidas, el resto más chicas y tenues, para no perder del todo la señal de "esto es un caso
+    # extremo" vs. "esto está apenas a un lado de la mediana".
+    es_flaggeada = fila['flag'] != 'dentro_del_intervalo'
     tooltip = (f"<b>{fila['comuna']}</b><br>"
                f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
                f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
@@ -2399,10 +2410,10 @@ for _, fila in mapa_datos.iterrows():
                f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
     folium.CircleMarker(
         location=[fila['latitud'], fila['longitud']],
-        radius=3 if es_gris else 6,
-        color=COLOR_POR_FLAG[fila['flag']],
-        fill=True, fill_opacity=0.25 if es_gris else 0.85,
-        opacity=0.25 if es_gris else 0.85,
+        radius=6 if es_flaggeada else 3,
+        color=color_por_residuo(fila['precio_real'], fila['q50']),
+        fill=True, fill_opacity=0.75 if es_flaggeada else 0.35,
+        opacity=0.85 if es_flaggeada else 0.4,
         tooltip=tooltip,
     ).add_to(mapa)
 
@@ -2456,15 +2467,15 @@ mapa_datos_completo = mapa_datos_completo.join(deptos_df.loc[mapa_datos_completo
 mapa_completo = folium.Map(location=[mapa_datos_completo['latitud'].mean(), mapa_datos_completo['longitud'].mean()],
                             zoom_start=12, tiles='OpenStreetMap')
 
-# Color por 'flag' únicamente (rojo sobrevalorada / verde subvalorada / gris dentro), nunca por
-# 'fold' -- train y test ya comparten el mismo criterio de color, no hay tratamiento especial para
-# ninguno de los dos. Con 5.284 puntos (5x más que el mapa de solo test) hay mucha más superposición
-# geográfica, así que se baja la opacidad de los coloreados (0.85 -> 0.55) para que dos círculos
-# superpuestos se vean más oscuros en vez de taparse -- la superposición se lee como información,
-# no se pierde.
+# Color por signo del residuo contra q50 (ver color_por_residuo, definida junto al mapa de solo
+# test) -- sin gris, toda casa se clasifica rojo/verde. 'fold' nunca entra en el color, train y
+# test comparten el mismo criterio. Igual que en el mapa de test, el tamaño/opacidad sí distingue
+# flaggeada (fuera del intervalo) de no-flaggeada, para no perder esa señal. Con 5.284 puntos (5x
+# más que el mapa de solo test) hay mucha más superposición geográfica, por eso la opacidad de
+# ambos grupos es más baja acá que en el mapa de test.
 
 for _, fila in mapa_datos_completo.iterrows():
-    es_gris = fila['flag'] == 'dentro_del_intervalo'
+    es_flaggeada = fila['flag'] != 'dentro_del_intervalo'
     tooltip = (f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
                f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
                f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
@@ -2472,10 +2483,10 @@ for _, fila in mapa_datos_completo.iterrows():
                f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
     folium.CircleMarker(
         location=[fila['latitud'], fila['longitud']],
-        radius=3 if es_gris else 6,
-        color=COLOR_POR_FLAG[fila['flag']],
-        fill=True, fill_opacity=0.15 if es_gris else 0.55,
-        opacity=0.15 if es_gris else 0.6,
+        radius=6 if es_flaggeada else 3,
+        color=color_por_residuo(fila['precio_real'], fila['q50']),
+        fill=True, fill_opacity=0.55 if es_flaggeada else 0.2,
+        opacity=0.6 if es_flaggeada else 0.25,
         tooltip=tooltip,
     ).add_to(mapa_completo)
 
