@@ -42,7 +42,7 @@ anterior, nunca commiteado).
 | Métrica | Valor |
 |---|---|
 | Filas tras limpieza | 5.284 (train 4.227 / test 1.057) |
-| Features finales | 82 |
+| Features finales | 75 (82 antes de la selección con CV anidada de P3, 2026-07-23) |
 | MdAPE modelo (HistGB, split fijo 80/20) | **8,39 %** (PASO 4c) / **8,61 %** (PASO 5d, `modelo_q50`) |
 | MdAPE baseline (mediana precio/m² por barrio) | 21,50 % |
 | MdAPE lineal (Ridge log-log, PASO 5b) | 12,15 % |
@@ -164,7 +164,7 @@ Falta solo:
 1. 5b modelo lineal log-log, 5c tuning de hiperparámetros, 5d evaluación final en test (no bloquea
    el objetivo de negocio -- el modelo actual con intervalos ya es accionable)
 
-### ✅ P3 — Validación cruzada (protocolo resuelto 2026-07-23; feature selection con CV sigue pendiente)
+### ✅ P3 — Validación cruzada (protocolo Y selección de features resueltos 2026-07-23)
 
 **Resuelto:** PASO 2b-4j se refactorizaron a pares `ajustar_*()`/`aplicar_*()` (comuna/barrio/
 orientación por KDTree, `bad_ranges`, `allocate_values`, codificación categórica, 3 escaladores
@@ -181,11 +181,24 @@ Alcance deliberadamente excluido de este refit (documentado en el propio código
 - PASO 4g (VIF/drop de 'Superficie útil') y PASO 4h (baseline) tampoco se recalculan por fold: son
   reglas estructurales fijas o diagnóstico de un solo split.
 
-**Sigue pendiente** (la parte de P3 que todavía no se resuelve): usar esta CV para decidir
-features de verdad -- descartar una columna solo si su pérdida de importancia es consistente entre
-folds, reemplazando la comparación de un solo split que PASO 4k ya marcó como ruido (antes
-"descarta 44 columnas", ahora "conserva las 82" sin tocar ninguna feature). Requiere nested CV
-(selección de importancia dentro de cada fold externo) -- más caro que el protocolo de arriba.
+**Selección de features con CV anidada (resuelto 2026-07-23):** `medir_importancia_anidada()`
+repite, dentro de cada uno de los 15 folds de `ejecutar_cv_repetida`, el split interno 80/20 +
+importancia por permutación de PASO 4k. Por fold, la cantidad de columnas "sin señal" varió mucho
+(41 a 54 de 82) -- confirma que un solo split es ruido, como ya se sabía. Exigiendo consistencia
+TOTAL (sin señal en el 100% de los folds donde la columna existió, con presencia en al menos el
+80% de los folds), solo **7 columnas** califican: `gastos_comunes_informado`,
+`onehot__Orientación_P`, `onehot__Tipo de casa_Otro`, y las 4 canchas deportivas raras (básquetbol/
+paddle/fútbol/polideportiva -- ya identificadas en PASO 4 como <1% de las casas). Comparando la CV
+completa (15 folds) con y sin esas 7: 8,36 % vs 8,38 % (diferencia +0,02 pp, muy por debajo del
+desvío de 0,35 %) -- **se aplicó el drop a producción**: `X_train_final`/`X_test_final` pasan de 82
+a **75 columnas**, reemplazando la conclusión "se conservan las 82" de PASO 4k (que sigue en el
+código como diagnóstico de referencia, sin tocar, con su advertencia actualizada apuntando acá).
+
+**Bug encontrado y corregido en el proceso:** el mapa completo de PASO 5i (extra) reconstruye el
+feature set completo desde `X` con los `aplicar_*` de PASO 4, que no sabían del drop -- rompía con
+`ValueError: feature names unseen at fit time` al predecir con `modelo_q05`/`q50`/`q95` (que sí
+quedaron fit con 75 columnas). Corregido reindexando `X_final_completo` a `X_train_final.columns`
+antes de predecir, en vez de asumir que ambos coinciden.
 
 ### ✅ P4 — MAE y RMSE reportados (resuelto 2026-07-23, PASO 5d)
 
@@ -213,6 +226,15 @@ residual entre Superficie total/Dormitorios/Baños (VIF 10-14, tolerado en PASO 
 coeficiente individual de Ridge entre variables correlacionadas. No se puede leer como "la
 superficie casi no le importa al precio" sin ese matiz -- es una limitación de interpretación del
 modelo lineal con estas features, no un hallazgo de mercado.
+
+**Confirmado (2026-07-23):** se reajustó el mismo Ridge (misma búsqueda de alfa) excluyendo
+Dormitorios/Baños/los 3 ratios estructurales, dejando 'Superficie total' como única variable de
+tamaño. La elasticidad subió a **0,288** -- 4,2 veces más alta, confirma que 0,068 era dilución por
+colinealidad y no un efecto de mercado genuinamente chico. Costo: el MdAPE de este modelo reducido
+empeora (12,15 % -> 14,76 %), esperable porque esas columnas sí aportan señal predictiva real (el
+propio HistGB las usa) -- 0,288 es el número a citar si se necesita una elasticidad hedónica
+defendible, pero el modelo reducido que la produce es solo un diagnóstico, no reemplaza a
+`modelo_lineal` en ningún lado del pipeline.
 
 ### ✅ P6 — Tuning de hiperparámetros (resuelto 2026-07-23, PASO 5c)
 
@@ -340,8 +362,13 @@ queda es refinamiento, ninguno bloquea nada:
    segmento alto (la opción descartada al elegir el enfoque de calibración, ver P1), no más ajuste
    de intervalo. Revisar también si conviene más granularidad de segmentos (ej. 6-8 en vez de 4)
    cuando haya más datos de calibración.
-4. La parte de P3 que sigue abierta (selección de features CON la CV, no solo el protocolo de
-   medición) -- reemplazar la decisión de un solo split de PASO 4k.
-5. Revisar la elasticidad precio-superficie de PASO 5b (0,068, sospechosamente baja) si en algún
-   momento se necesita un número hedónico defendible -- hoy está diluida por colinealidad, no
-   corregida (ver P5).
+4. ~~Selección de features CON la CV (nested)~~ -- **resuelto 2026-07-23** (ver P3): 7 columnas
+   sin señal en el 100% de 15 folds (`gastos_comunes_informado`, 4 canchas deportivas raras,
+   `onehot__Orientación_P`, `onehot__Tipo de casa_Otro`). CV completo con/sin ellas: 8,36% vs
+   8,38% (+0,02 pp, dentro del ruido) -- se aplicó el drop, `X_train_final`/`X_test_final` pasan de
+   82 a **75 columnas**. De paso se encontró y corrigió un bug real: el mapa completo de PASO 5i no
+   sabía del drop y rompía al predecir.
+5. ~~Elasticidad precio-superficie~~ -- **resuelto 2026-07-23** (ver P5): confirmado que 0,068 era
+   dilución por colinealidad -- sin Dormitorios/Baños/ratios, sube a **0,288** (4,2x). Costo:
+   MdAPE de ese modelo diagnóstico empeora a 14,76% -- 0,288 es el número a citar para uso hedónico,
+   pero ese modelo reducido no reemplaza a `modelo_lineal` en el pipeline.

@@ -1826,11 +1826,11 @@ print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}
 # descartan 44 columnas", y con la limpieza ya ajustada solo con train concluye lo contrario.
 # La decisión la estaba tomando el ruido de partición, no la señal.
 #
-# Para que esto sea una decisión y no un sorteo hay que reemplazar la validación simple por
-# RepeatedKFold y descartar una columna solo si su pérdida de importancia es consistente entre
-# folds -- pendiente. Mientras tanto se conserva el feature set completo, que es la opción
-# conservadora: una columna irrelevante le cuesta poco a un modelo de árboles, y descartar una
-# que sí aportaba no se recupera.
+# RESUELTO (2026-07-23): la CV anidada de PASO 5a (extra), más abajo, repite esta medición dentro
+# de cada uno de los 15 folds de `ejecutar_cv_repetida` y descarta una columna solo si no tiene
+# señal en TODOS los folds donde apareció -- ahí sí se aplica el drop de verdad a
+# X_train_final/X_test_final, superando la conclusión "se conservan las 82" que este split único
+# dejaba acá arriba (que sigue corriendo tal cual, sin tocar, como diagnóstico de referencia).
 
 # =======================================================================================
 # PASO 4 -- WRAPPERS DE ORQUESTACIÓN (ajustar_features / aplicar_features)
@@ -1968,12 +1968,16 @@ from sklearn.model_selection import StratifiedKFold
 
 
 def ejecutar_cv_repetida(universo: pd.DataFrame, n_splits: int = 5, n_repeats: int = 3,
-                          random_state: int = 42) -> pd.Series:
+                          random_state: int = 42, columnas_a_excluir: list = None) -> pd.Series:
     """CV repetida (n_splits x n_repeats folds) estratificada por 'comuna' -- mismo criterio del
     split fijo de PASO 2b/4b. Cada fold reajusta TODO el pipeline (ajustar_imputacion +
     ajustar_features) con sus propios índices de train, y evalúa MdAPE sobre su propia porción de
     validación. verbose=False en los ajustar_*/aplicar_* internos: con 15 folds, el log completo
-    de cada uno (idéntico al de la corrida única) inundaría la salida."""
+    de cada uno (idéntico al de la corrida única) inundaría la salida.
+
+    `columnas_a_excluir`: para comparar el feature set completo contra uno reducido (ver selección
+    de features con CV anidada, más abajo) sin duplicar todo este bucle -- se dropean, si existen,
+    de X_train_final/X_val_final de cada fold antes de entrenar."""
     etiquetas = universo['comuna'].fillna('Desconocida')
     scores = []
     for repeat in range(n_repeats):
@@ -1990,15 +1994,21 @@ def ejecutar_cv_repetida(universo: pd.DataFrame, n_splits: int = 5, n_repeats: i
             y_tr, y_val = y_fold.loc[idx_train_fold], y_fold.loc[idx_val_fold]
 
             params_feat_fold = ajustar_features(X_tr, y_tr, verbose=False)
+            X_train_final_fold = params_feat_fold.X_train_final
             X_val_final = aplicar_features(X_val, params_feat_fold)
 
-            if X_val_final.shape[1] != params_feat_fold.X_train_final.shape[1]:
+            if X_val_final.shape[1] != X_train_final_fold.shape[1]:
                 print(f'[repeat {repeat} fold {fold}] ADVERTENCIA: columnas desalineadas -- '
-                      f'train {params_feat_fold.X_train_final.shape[1]} vs val {X_val_final.shape[1]}')
-                X_val_final = X_val_final.reindex(columns=params_feat_fold.X_train_final.columns, fill_value=0)
+                      f'train {X_train_final_fold.shape[1]} vs val {X_val_final.shape[1]}')
+                X_val_final = X_val_final.reindex(columns=X_train_final_fold.columns, fill_value=0)
+
+            if columnas_a_excluir:
+                a_dropear = [c for c in columnas_a_excluir if c in X_train_final_fold.columns]
+                X_train_final_fold = X_train_final_fold.drop(columns=a_dropear)
+                X_val_final = X_val_final.drop(columns=a_dropear)
 
             modelo_fold = HistGradientBoostingRegressor(random_state=42)
-            modelo_fold.fit(params_feat_fold.X_train_final, np.log(y_tr))
+            modelo_fold.fit(X_train_final_fold, np.log(y_tr))
             pred_fold = np.exp(modelo_fold.predict(X_val_final))
             score = mdape(y_val, pred_fold)
             scores.append(score)
@@ -2013,6 +2023,109 @@ def ejecutar_cv_repetida(universo: pd.DataFrame, n_splits: int = 5, n_repeats: i
 
 
 resultados_cv = ejecutar_cv_repetida(deptos_df_limpio.loc[indice_train])
+
+# =======================================================================================
+# PASO 5a (extra) -- SELECCIÓN DE FEATURES CON CV ANIDADA (resuelve la parte abierta de P3)
+# =======================================================================================
+# PASO 4k midió importancia por permutación sobre UN split interno de validación y advirtió, en su
+# propio código, que la decisión resultante (conservar las 82 columnas) podía ser ruido: variar la
+# semilla del split daba MdAPE 8,15/8,29/8,51%, un rango mayor que la diferencia de 0,2 puntos que
+# esa decisión medía. Acá se repite esa medición, pero DENTRO de cada uno de los 15 folds externos
+# de `ejecutar_cv_repetida` (con su propio split 80/20 interno de validación, mismo criterio de
+# PASO 4k) -- una columna solo se marca "sin señal" para descartar si lo es de forma CONSISTENTE
+# entre folds, no en uno solo.
+#
+# Es CV anidada de verdad: el fold externo decide qué filas son train/val para medir MdAPE (como en
+# PASO 5a), y dentro del train de cada fold externo hay un split interno solo para medir qué
+# columnas importan -- exactamente lo que la advertencia original de PASO 4k pedía como arreglo.
+
+from sklearn.inspection import permutation_importance
+
+
+def medir_importancia_anidada(universo: pd.DataFrame, n_splits: int = 5, n_repeats: int = 3,
+                               fraccion_val_interna: float = 0.2, random_state: int = 42) -> pd.DataFrame:
+    etiquetas = universo['comuna'].fillna('Desconocida')
+    registros = []
+    n_folds_total = n_splits * n_repeats
+    fold_id = 0
+    for repeat in range(n_repeats):
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state + repeat)
+        for pos_train, _ in skf.split(universo, etiquetas):
+            idx_train_fold = universo.index[pos_train]
+
+            params_imp_fold = ajustar_imputacion(universo, idx_train_fold, verbose=False)
+            df_fold = aplicar_imputacion(universo, params_imp_fold, verbose=False)
+            X_fold, y_fold = seleccionar_columnas(df_fold, verbose=False)
+            X_tr = X_fold.loc[idx_train_fold]
+            y_tr = y_fold.loc[idx_train_fold]
+
+            params_feat_fold = ajustar_features(X_tr, y_tr, verbose=False)
+            X_tr_final = params_feat_fold.X_train_final
+
+            X_sel, X_val_sel, y_sel, y_val_sel = train_test_split(
+                X_tr_final, y_tr, test_size=fraccion_val_interna, stratify=X_tr['comuna'], random_state=random_state,
+            )
+            modelo_sel = HistGradientBoostingRegressor(random_state=42)
+            modelo_sel.fit(X_sel, np.log(y_sel))
+            resultado_perm = permutation_importance(
+                modelo_sel, X_val_sel, np.log(y_val_sel), n_repeats=10, random_state=42, n_jobs=-1)
+
+            sin_senal = resultado_perm.importances_mean - resultado_perm.importances_std <= 0
+            for columna, sin_senal_col in zip(X_val_sel.columns, sin_senal):
+                registros.append({'fold': fold_id, 'columna': columna, 'sin_senal': sin_senal_col})
+
+            fold_id += 1
+            print(f'[importancia anidada, fold {fold_id}/{n_folds_total}] '
+                  f'{sin_senal.sum()} columnas sin señal de {len(sin_senal)}.')
+
+    return pd.DataFrame(registros)
+
+
+registros_importancia = medir_importancia_anidada(deptos_df_limpio.loc[indice_train])
+
+resumen_importancia = registros_importancia.groupby('columna')['sin_senal'].agg(['mean', 'count'])
+resumen_importancia = resumen_importancia.rename(columns={'mean': 'fraccion_sin_senal', 'count': 'folds_presente'})
+
+N_FOLDS_TOTAL = 15  # 5 splits x 3 repeticiones, ver ejecutar_cv_repetida/medir_importancia_anidada
+UMBRAL_FOLDS_PRESENTE = 0.8  # exigir que la columna haya existido en al menos el 80% de los folds
+
+columnas_candidatas_a_descartar = resumen_importancia[
+    (resumen_importancia['fraccion_sin_senal'] >= 1.0) &
+    (resumen_importancia['folds_presente'] >= N_FOLDS_TOTAL * UMBRAL_FOLDS_PRESENTE)
+].index.tolist()
+
+print(f'Columnas sin señal EN TODOS los folds donde aparecieron ({len(columnas_candidatas_a_descartar)} '
+      f'de {resumen_importancia.shape[0]}):')
+print(columnas_candidatas_a_descartar)
+
+# La consistencia entre folds NO es suficiente por sí sola -- PASO 4k ya establecía que solo se
+# descarta si el MdAPE no empeora. Se repite ese chequeo, pero con la CV completa (15 folds) de
+# ambos lados, no un solo split: compara `resultados_cv` (feature set completo, ya calculado
+# arriba) contra la misma CV con las columnas candidatas excluidas.
+
+resultados_cv_reducido = ejecutar_cv_repetida(deptos_df_limpio.loc[indice_train],
+                                               columnas_a_excluir=columnas_candidatas_a_descartar)
+
+diferencia_medias = resultados_cv_reducido.mean() - resultados_cv.mean()
+print(f'MdAPE CV -- completo (82 cols): {resultados_cv.mean():.2f}% ± {resultados_cv.std():.2f}%. '
+      f'Reducido ({82 - len(columnas_candidatas_a_descartar)} cols): '
+      f'{resultados_cv_reducido.mean():.2f}% ± {resultados_cv_reducido.std():.2f}%. '
+      f'Diferencia: {diferencia_medias:+.2f} pp.')
+
+if diferencia_medias <= resultados_cv.std():
+    print(f'Se descartan {len(columnas_candidatas_a_descartar)} columnas: el MdAPE reducido no '
+          f'empeora más que el desvío entre folds del feature set completo -- a diferencia de la '
+          f'decisión de un solo split de PASO 4k, esta sí está respaldada por 15 folds.')
+    # Reemplaza la decisión de PASO 4k (que se quedó con las 82 por no tener cómo distinguir señal
+    # de ruido en un solo split): de acá en adelante, X_train_final/X_test_final -- y todo lo que
+    # se construye sobre ellos en PASO 5b en más (lineal, tuning, cuantiles) -- usan el feature set
+    # reducido, respaldado por 15 folds en vez de uno.
+    X_train_final = X_train_final.drop(columns=columnas_candidatas_a_descartar)
+    X_test_final = X_test_final.drop(columns=columnas_candidatas_a_descartar)
+    print(f'X_train_final: {X_train_final.shape}. X_test_final: {X_test_final.shape}.')
+else:
+    print('Se conservan las 82 columnas: el MdAPE reducido empeora más que el ruido medido entre '
+          'folds -- ni la CV anidada respalda descartar estas columnas.')
 
 # =======================================================================================
 # PASO 5b -- MODELO LINEAL LOG-LOG
@@ -2101,6 +2214,42 @@ print('Top 10 coeficientes positivos (suben el precio):')
 print(top_positivos)
 print('Top 10 coeficientes negativos (bajan el precio):')
 print(top_negativos)
+
+# Diagnóstico de colinealidad -- la elasticidad de arriba (0,068 medida originalmente) es
+# sospechosamente baja para una elasticidad hedónica de superficie. PASO 4g ya midió VIF 10-14
+# entre 'Superficie total' y Dormitorios/Baños/los 3 ratios estructurales (todos comparten
+# superficie útil o dormitorios en su construcción). Con esas variables en el mismo modelo, Ridge
+# reparte el efecto de "casa más grande" entre todas ellas -- el coeficiente de 'Superficie total'
+# a solas ya no captura el efecto total, solo lo que sobra después de que las demás se llevaron su
+# parte. Se reajusta el MISMO Ridge (misma búsqueda de alfa) EXCLUYENDO esas columnas
+# estructuralmente colineales, dejando 'Superficie total' como única variable de tamaño: si la
+# elasticidad sube marcadamente, confirma que era dilución por colinealidad y no un efecto de
+# mercado genuinamente chico.
+
+COLUMNAS_COLINEALES_SUPERFICIE = ['remainder__Dormitorios', 'remainder__Baños',
+                                   'ratio_construido', 'banos_por_dormitorio', 'm2_por_dormitorio']
+columnas_sin_colineales = [c for c in X_train_final_lineal.columns if c not in COLUMNAS_COLINEALES_SUPERFICIE]
+
+modelo_lineal_sin_colineales = RidgeCV(alphas=alfas_candidatos, scoring=scorer_mdape, cv=5)
+modelo_lineal_sin_colineales.fit(X_train_final_lineal[columnas_sin_colineales], np.log(y_train))
+
+coeficientes_sin_colineales = pd.Series(modelo_lineal_sin_colineales.coef_, index=columnas_sin_colineales)
+elasticidad_sin_colineales = coeficientes_sin_colineales['remainder__Superficie total'] / escala_superficie_total
+
+mdape_sin_colineales = mdape(y_test, np.exp(
+    modelo_lineal_sin_colineales.predict(X_test_final_lineal[columnas_sin_colineales])))
+
+print(f'Elasticidad precio-superficie SIN Dormitorios/Baños/ratios (alfa={modelo_lineal_sin_colineales.alpha_}): '
+      f'{elasticidad_sin_colineales:.3f} (antes: {elasticidad_superficie_total:.3f}). '
+      f'MdAPE test: {mdape_sin_colineales:.2f}% (antes: {mdape_lineal:.2f}%).')
+
+if elasticidad_sin_colineales > elasticidad_superficie_total * 1.5:
+    print('  -> La elasticidad sube marcadamente al sacar las columnas colineales: confirma que '
+          '0,068 era dilución por colinealidad, no un efecto de mercado genuinamente chico.')
+else:
+    print('  -> La elasticidad NO sube marcadamente: la colinealidad no explica por sí sola el '
+          'número bajo -- el efecto parcial de la superficie parece genuinamente chico en este '
+          'segmento, una vez controlado por ubicación y el resto de las características.')
 
 # =======================================================================================
 # PASO 5c -- TUNING DE HIPERPARÁMETROS
@@ -2652,6 +2801,11 @@ X_final_completo = aplicar_ratios(X_final_completo, X, params_ratios)
 X_final_completo = X_final_completo.drop(columns=COLUMNAS_DROP_ESTRUCTURAL)
 X_final_completo = agregar_gastos_comunes_informado(X_final_completo, X)
 X_final_completo = aplicar_densidad(X_final_completo, X, params_densidad)
+
+# Reindexar a las columnas ACTUALES de X_train_final (fuente de verdad de qué feature set está en
+# producción) -- si la CV anidada de PASO 5a (extra) descartó columnas, `aplicar_*` de arriba las
+# reconstruye igual (no sabe de ese drop posterior), y modelo_q05/q50/q95 quedaron fit sin ellas.
+X_final_completo = X_final_completo[X_train_final.columns]
 
 q05_completo_crudo = np.exp(modelo_q05.predict(X_final_completo))
 q50_completo = np.exp(modelo_q50.predict(X_final_completo))
