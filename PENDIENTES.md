@@ -52,7 +52,8 @@ anterior, nunca commiteado).
 | RMSE (PASO 5d) | 319.759.311 CLP (RMSE/MAE = 1,97) |
 | Residuo p10 / p50 / p90 / p99 (PASO 5d) | −16,5 % / −0,5 % / +22,7 % / **+71,8 %** |
 | MdAPE por decil de precio (PASO 5d) | 8,4 % en baratos -> **13,6 %** (decil 8) -> **18,5 %** (decil 9) |
-| Cobertura del intervalo (PASO 5e) | 91,7 % global, 85,8 % en deciles 8-9 |
+| Cobertura del intervalo (PASO 5e, segmentado + q05/q95 tuned) | 91,8 % global, 97,2 % / 89,6 % en deciles 8/9 |
+| Ancho del intervalo, mediana (PASO 5e) | 53,1 % del precio predicho (antes de tuning: 56,1 %) |
 
 El desvío de la CV (±0,35 pp) coincide con el rango ya medido variando la semilla del split fijo
 (8,15/8,29/8,51 %, rango 0,36 pp) -- señal de que el refit por fold funciona de verdad y no es un
@@ -119,12 +120,31 @@ Medido: con umbral fijo de ±10 % se hubiera flagueado el 43 % del inventario --
 `HistGradientBoostingRegressor(loss="quantile")` a q=0,05/0,50/0,95, calibrados sobre un fold de
 calibración recortado de train (20 %, nunca visto por el fit). Medido en test:
 
-- Cobertura empírica: **91,7 %** (nominal 90 %) -- bien calibrado.
-- Ancho del intervalo (mediana): **56,1 %** del precio predicho (p25: 46,7 %, p75: 71,3 %) -- ancho,
+- Cobertura empírica: **90,5 %** (nominal 90 %) -- bien calibrado.
+- Ancho del intervalo (mediana): **56,1 %** del precio predicho (p25: 43,1 %, p75: 76,4 %) -- ancho,
   la herramienta solo señala casos extremos con confianza, no matices finos. Es un hallazgo, no un
   fracaso, pero hay que comunicarlo.
-- Cobertura por decil de precio: 93-95 % en deciles baratos, **85,8 %** en los dos deciles más
-  caros -- el intervalo es menos confiable justo donde una mala calibración cuesta más plata.
+
+**Corrección conformal segmentada por precio (2026-07-23, a pedido explícito):** la corrección
+original era GLOBAL (un solo número para todo el inventario) y daba 91,7 % de cobertura promedio
+pero solo 85,8 % en los dos deciles más caros -- la corrección promediaba sobre todo el inventario
+y quedaba angosta justo donde el modelo es peor. Se reemplazó por calibración Mondrian/group-
+conditional (Vovk 2003): 4 segmentos por q50 predicho (nunca por precio real, para que sea
+calculable en producción), cada uno con su propia corrección conformal ajustada solo con sus
+~211 filas de calibración. Medido el efecto:
+
+| Decil de precio | Antes (corrección global) | Después (por segmento) |
+|---|---|---|
+| 8 (caro) | 85,8 % | **94,3 %** |
+| 9 (más caro) | 85,8 % | **89,6 %** |
+
+**Trade-off honesto, no escondido:** arreglar los deciles caros corrió algo de ruido a los deciles
+medios (decil 3: 80,2 %, antes más cerca de 90 %) -- efecto de borde esperable con solo 4 segmentos
+y ~211 filas de calibración por segmento (un decil puede caer justo en el límite entre dos
+segmentos, donde la corrección salta discretamente en vez de variar suave). Global sigue mejor
+calibrado (90,5 % vs 91,7 % antes), y el punto que motivó el cambio (decil 9) mejoró 3,8 pp -- neto
+positivo, pero no una solución perfecta. Balance de flags también mejoró: 4,4 %/5,1 %
+sub/sobrevaloradas (antes 2,9 %/5,4 %, más cerca del ~5 %/5 % esperado por construcción).
 
 PASO 5f (residuo + regla de flag fuera-de-intervalo + ranking por distancia al borde) y 5g (filtros
 del comprador, placeholders configurables, aplicados sobre el ranking) también implementados.
@@ -205,10 +225,24 @@ sí está medido y sí es una mejora real, no ruido).
 Mejores hiperparámetros encontrados: `min_samples_leaf=10, max_leaf_nodes=127, max_features=0.9,
 max_bins=128, learning_rate=0.1, l2_regularization=1.0`.
 
-**No aplicado automáticamente al pipeline** (`modelo_q05`/`q50`/`q95` de PASO 5e siguen con
-defaults) -- adoptar estos hiperparámetros para los modelos de cuantil requeriría repetir la
-búsqueda con pinball loss, no MdAPE (un objetivo distinto que `loss='quantile'` ya optimiza de por
-sí). Queda como recomendación documentada, no como cambio de producción.
+**Aplicado a los modelos de cuantil (2026-07-23, PASO 5e):** estos hiperparámetros se buscaron con
+scorer MdAPE, un objetivo distinto al de `modelo_q05`/`q50`/`q95` (`loss='quantile'`) -- aplicarlos
+tal cual habría mezclado el óptimo de un problema con la solución de otro. Se repitió la búsqueda
+con **pinball loss** (la métrica que `loss='quantile'` sí optimiza), una vez por cuantil, con CV
+sobre `X_train_ajuste` (la partición exacta de producción, no train+calibración). Resultado,
+diferenciado por cuantil -- señal de que tratarlos igual habría sido un error:
+
+| Cuantil | Pinball default | Pinball tuned | Mejora | Decisión |
+|---|---|---|---|---|
+| 0,05 | 0,0206 | 0,0195 | 5,3 % | **Se adopta** |
+| 0,50 | 0,0628 | 0,0616 | 1,9 % | Se mantiene default (bajo el umbral de 2 %) |
+| 0,95 | 0,0237 | 0,0219 | 7,5 % | **Se adopta** |
+
+Efecto medido en el intervalo final (test): ancho mediano **56,1 % -> 53,1 %** del precio
+predicho (más angosto, más útil) con cobertura empírica **90,5 % -> 91,8 %** (se mantiene bien
+calibrado, incluso más conservador). El decil 3, que había quedado con ruido de borde tras
+segmentar por precio (80,2 %), también mejoró a 85,8 % -- la mejora de q05/q95 ayudó ahí también,
+no solo en los deciles caros.
 
 ### ✅ P7 — Corregir `tiene_gastos_comunes` (resuelto 2026-07-23)
 
@@ -291,17 +325,23 @@ P1-P7 están todos resueltos. El entregable de negocio (ranking con intervalos, 
 existe y corre de punta a punta; PASO 5 completo hasta 5i; `requirements.txt` congelado. Lo que
 queda es refinamiento, ninguno bloquea nada:
 
-1. **Decidir sobre el tuning de 5c**: adoptar `min_samples_leaf=10, max_leaf_nodes=127,
-   max_features=0.9, max_bins=128, learning_rate=0.1, l2_regularization=1.0` en `modelo_q05`/`q50`/
-   `q95` de PASO 5e (mejora medida 0,70 pp, supera el ruido) -- pero repetir la búsqueda con
-   pinball loss en vez de MdAPE, porque esos tres modelos optimizan `loss='quantile'`, no el
-   objetivo que se tuneó acá.
-2. **Segmentar por precio** (sugerido por P4/P5d y por la cobertura de PASO 5e, dos métricas
-   independientes apuntando a lo mismo): el error casi se duplica en los dos deciles más caros. Un
-   modelo separado para el segmento alto, o simplemente declarar el rango de precio donde la
-   herramienta es confiable, es la conclusión de producto más accionable de toda la sesión.
-3. La parte de P3 que sigue abierta (selección de features CON la CV, no solo el protocolo de
+1. ~~Segmentar por precio~~ -- **resuelto 2026-07-23**: calibración conformal Mondrian/group-
+   conditional por segmento de precio (ver P1).
+2. ~~Decidir sobre el tuning de 5c~~ -- **resuelto 2026-07-23**: se repitió la búsqueda con pinball
+   loss por cuantil (ver P6) en vez de aplicar el tuning de MdAPE tal cual. q05/q95 adoptaron
+   tuning (mejoras de 5,3 %/7,5 %), q50 se quedó con el default (1,9 %, bajo el umbral). Efecto
+   combinado con la segmentación de precio: cobertura 91,8 % global, ancho mediano del intervalo
+   bajó de 56,1 % a **53,1 %** (más angosto, más útil), y el decil 3 (que había quedado con ruido de
+   borde tras segmentar solo) mejoró de 80,2 % a 85,8 %.
+3. **Punto pendiente real que queda de la ronda de segmentación/tuning**: el MdAPE puntual del
+   segmento caro (P4/P5d, `modelo_q50`, que se quedó con default) sigue en ~18,5 % en el decil 9 --
+   los cambios de esta ronda mejoraron la CALIBRACIÓN del intervalo ahí, no la PRECISIÓN del punto
+   predicho. Si se necesita bajar ese número, hace falta un modelo de punto separado para el
+   segmento alto (la opción descartada al elegir el enfoque de calibración, ver P1), no más ajuste
+   de intervalo. Revisar también si conviene más granularidad de segmentos (ej. 6-8 en vez de 4)
+   cuando haya más datos de calibración.
+4. La parte de P3 que sigue abierta (selección de features CON la CV, no solo el protocolo de
    medición) -- reemplazar la decisión de un solo split de PASO 4k.
-4. Revisar la elasticidad precio-superficie de PASO 5b (0,068, sospechosamente baja) si en algún
+5. Revisar la elasticidad precio-superficie de PASO 5b (0,068, sospechosamente baja) si en algún
    momento se necesita un número hedónico defendible -- hoy está diluida por colinealidad, no
    corregida (ver P5).

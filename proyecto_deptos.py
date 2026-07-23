@@ -2191,48 +2191,129 @@ X_train_ajuste, X_train_calib, y_train_ajuste, y_train_calib = train_test_split(
 print(f'Ajuste de cuantiles: {len(X_train_ajuste)} filas. Calibración conformal: {len(X_train_calib)} filas.')
 
 
-def entrenar_modelo_cuantil(quantile: float) -> HistGradientBoostingRegressor:
+def entrenar_modelo_cuantil(quantile: float, hiperparametros: dict = None) -> HistGradientBoostingRegressor:
     """Igual que el resto del archivo: se entrena sobre log(clp), no CLP directo (ver cabecera) --
     los cuantiles son equivariantes ante transformaciones monótonas, así que exp(cuantil de
     log(clp)) es el cuantil de clp."""
-    modelo = HistGradientBoostingRegressor(loss='quantile', quantile=quantile, random_state=42)
+    modelo = HistGradientBoostingRegressor(loss='quantile', quantile=quantile, random_state=42,
+                                            **(hiperparametros or {}))
     modelo.fit(X_train_ajuste, np.log(y_train_ajuste))
     return modelo
 
 
-modelo_q05 = entrenar_modelo_cuantil(0.05)
-modelo_q50 = entrenar_modelo_cuantil(0.50)
-modelo_q95 = entrenar_modelo_cuantil(0.95)
+# Decisión sobre el tuning de PASO 5c: esos hiperparámetros se buscaron con scorer MdAPE, un
+# objetivo distinto al de estos tres modelos (loss='quantile'). Aplicarlos tal cual acá sería
+# mezclar el óptimo de un problema con la solución de otro. Se repite la búsqueda con pinball loss
+# (la métrica que loss='quantile' optimiza de verdad), una vez por cuantil -- 0,05/0,50/0,95 pueden
+# tener óptimos distintos entre sí. CV sobre X_train_ajuste, no X_train_final completo: es la
+# partición exacta sobre la que se entrenan estos modelos en producción (arriba), no train+
+# calibración -- usar X_train_final mediría un problema ligeramente distinto al que se resuelve acá.
+
+from sklearn.metrics import mean_pinball_loss
+
+UMBRAL_MEJORA_RELATIVA_PINBALL = 2.0  # % -- adoptar tuning solo si mejora más que este margen, para no perseguir ruido de CV
+
+
+def tunear_modelo_cuantil(quantile: float, n_iter: int = 15) -> dict:
+    scorer_pinball = make_scorer(mean_pinball_loss, alpha=quantile, greater_is_better=False)
+
+    busqueda = RandomizedSearchCV(
+        HistGradientBoostingRegressor(loss='quantile', quantile=quantile, random_state=42),
+        param_distributions=distribucion_hiperparametros,
+        n_iter=n_iter, cv=cv_barata, scoring=scorer_pinball, random_state=42, n_jobs=-1,
+    )
+    busqueda.fit(X_train_ajuste, np.log(y_train_ajuste))
+    pinball_tuned = -busqueda.best_score_
+
+    pinball_default = -np.mean(cross_val_score(
+        HistGradientBoostingRegressor(loss='quantile', quantile=quantile, random_state=42),
+        X_train_ajuste, np.log(y_train_ajuste), cv=cv_barata, scoring=scorer_pinball))
+
+    mejora_relativa = (pinball_default - pinball_tuned) / pinball_default * 100
+    print(f'Cuantil {quantile}: pinball loss default={pinball_default:.4f}, tuned={pinball_tuned:.4f} '
+          f'(mejora {mejora_relativa:.1f}%). Hiperparámetros tuned: {busqueda.best_params_}')
+
+    if mejora_relativa > UMBRAL_MEJORA_RELATIVA_PINBALL:
+        print(f'  -> Mejora supera el umbral ({UMBRAL_MEJORA_RELATIVA_PINBALL}%): se adopta el tuning.')
+        return busqueda.best_params_
+    print(f'  -> Mejora no supera el umbral ({UMBRAL_MEJORA_RELATIVA_PINBALL}%): se mantiene el default.')
+    return {}
+
+
+hiperparametros_q05 = tunear_modelo_cuantil(0.05)
+hiperparametros_q50 = tunear_modelo_cuantil(0.50)
+hiperparametros_q95 = tunear_modelo_cuantil(0.95)
+
+modelo_q05 = entrenar_modelo_cuantil(0.05, hiperparametros_q05)
+modelo_q50 = entrenar_modelo_cuantil(0.50, hiperparametros_q50)
+modelo_q95 = entrenar_modelo_cuantil(0.95, hiperparametros_q95)
 
 # Conformity score de CQR: cuánto se pasa cada casa de calibración fuera del intervalo crudo
 # [q05, q95] -- positivo si cae afuera (por cualquiera de los dos lados), negativo si cae adentro
 # con margen. Se mide en CLP (escala real), no en log, porque el intervalo final se reporta en CLP.
 
 q05_calib = np.exp(modelo_q05.predict(X_train_calib))
+q50_calib = np.exp(modelo_q50.predict(X_train_calib))
 q95_calib = np.exp(modelo_q95.predict(X_train_calib))
 conformity_scores = np.maximum(q05_calib - y_train_calib.to_numpy(), y_train_calib.to_numpy() - q95_calib)
 
-# Corrección conformal: cuantil (1-alpha)(1+1/n) de los conformity scores -- la corrección finita-
-# muestra de Romano et al., no simplemente el cuantil (1-alpha), para que la garantía de cobertura
-# valga con n_calib finito y no solo asintóticamente.
+# Corrección conformal POR SEGMENTO DE PRECIO (Mondrian / group-conditional conformal prediction --
+# Vovk 2003, mismo marco de Romano et al. 2019 que ya usa este bloque). Medido en PASO 5d/5e antes
+# de este cambio: una corrección GLOBAL única daba 91,7% de cobertura en promedio pero solo 85,8%
+# en los dos deciles de precio más caros -- promedia sobre todo el inventario y termina angosta
+# donde el modelo es peor (precio alto) y ancha donde ya era bueno (precio bajo). Calibrar una
+# corrección distinta por segmento hace que la garantía de cobertura valga DENTRO de cada segmento,
+# no solo en el promedio global.
+#
+# El segmento se define por el q50 PREDICHO, nunca por el precio real -- es la única forma de que
+# la asignación sea calculable en producción, sobre una casa nueva sin precio real conocido. Los
+# cortes se fijan con el q50 de CALIBRACIÓN (nunca de test), mismo criterio "ajustar con train,
+# aplicar a lo demás" del resto del archivo. 4 segmentos (cuartiles): con ~846 filas de calibración,
+# deciles (como en PASO 5d/5e) dejarían ~85 filas por grupo, demasiado poco para un cuantil
+# finito-muestra estable; cuartiles dan ~211 por grupo y siguen aislando razonablemente el cuarto
+# más caro, que es donde se concentra el problema medido.
 
-n_calib = len(conformity_scores)
-nivel_ajustado = min(1.0, (1 - ALPHA_INTERVALO) * (1 + 1 / n_calib))
-correccion_conformal = np.quantile(conformity_scores, nivel_ajustado)
-print(f'Corrección conformal (n_calib={n_calib}, nivel={nivel_ajustado:.4f}): '
-      f'{correccion_conformal:,.0f} CLP')
+N_SEGMENTOS_PRECIO = 4
 
-# Intervalo final sobre TEST (nunca visto por el ajuste de cuantiles ni por la calibración):
-# predicción cruda +- la corrección conformal, en CLP. Salvaguarda de orden: la corrección es
-# simétrica y no debería cruzar los cuantiles, pero si `correccion_conformal` sale negativa (la
-# calibración encontró que el intervalo crudo ya sobraba margen) un caso límite podría invertir
-# q05/q95 -- se fuerza el orden por seguridad, mismo criterio que el diseño original advertía para
-# cuantiles sin calibrar.
+cortes_segmento = np.quantile(q50_calib, np.linspace(0, 1, N_SEGMENTOS_PRECIO + 1))
+cortes_segmento[0], cortes_segmento[-1] = -np.inf, np.inf
 
-q05_test = np.exp(modelo_q05.predict(X_test_final)) - correccion_conformal
+
+def asignar_segmento(q50_pred: np.ndarray) -> np.ndarray:
+    """Segmento 0 (más barato) a N_SEGMENTOS_PRECIO-1 (más caro), según los cortes fijados con el
+    q50 de calibración."""
+    return np.digitize(q50_pred, cortes_segmento[1:-1])
+
+
+segmento_calib = asignar_segmento(q50_calib)
+correcciones_por_segmento = {}
+for segmento in range(N_SEGMENTOS_PRECIO):
+    scores_segmento = conformity_scores[segmento_calib == segmento]
+    n_seg = len(scores_segmento)
+    nivel_seg = min(1.0, (1 - ALPHA_INTERVALO) * (1 + 1 / n_seg))
+    correcciones_por_segmento[segmento] = np.quantile(scores_segmento, nivel_seg)
+    print(f'Segmento {segmento} (q50 predicho en [{cortes_segmento[segmento]:,.0f}, '
+          f'{cortes_segmento[segmento + 1]:,.0f}] CLP): n_calib={n_seg}, '
+          f'corrección={correcciones_por_segmento[segmento]:,.0f} CLP')
+
+
+def corregir_por_segmento(q05_crudo: np.ndarray, q95_crudo: np.ndarray, q50_pred: np.ndarray):
+    """Aplica la corrección conformal del segmento correspondiente a cada fila (según su propio
+    q50 predicho), en vez de una corrección global. Salvaguarda de orden: la corrección de un
+    segmento podría en teoría salir negativa (la calibración de ESE segmento encontró que el
+    intervalo crudo ya sobraba margen ahí) e invertir q05/q95 en algún caso límite -- se fuerza el
+    orden por seguridad, mismo criterio que el diseño original advertía para cuantiles sin
+    calibrar."""
+    correccion = np.array([correcciones_por_segmento[s] for s in asignar_segmento(q50_pred)])
+    q05 = q05_crudo - correccion
+    q95 = q95_crudo + correccion
+    return np.minimum(q05, q95), np.maximum(q05, q95)
+
+
+q05_test_crudo = np.exp(modelo_q05.predict(X_test_final))
 q50_test = np.exp(modelo_q50.predict(X_test_final))
-q95_test = np.exp(modelo_q95.predict(X_test_final)) + correccion_conformal
-q05_test, q95_test = np.minimum(q05_test, q95_test), np.maximum(q05_test, q95_test)
+q95_test_crudo = np.exp(modelo_q95.predict(X_test_final))
+q05_test, q95_test = corregir_por_segmento(q05_test_crudo, q95_test_crudo, q50_test)
 
 # Validación obligatoria del intervalo:
 #   - Cobertura empírica: debe dar ~90%. Si da 70%, el intervalo miente y el ranking de PASO 5f
@@ -2572,10 +2653,10 @@ X_final_completo = X_final_completo.drop(columns=COLUMNAS_DROP_ESTRUCTURAL)
 X_final_completo = agregar_gastos_comunes_informado(X_final_completo, X)
 X_final_completo = aplicar_densidad(X_final_completo, X, params_densidad)
 
-q05_completo = np.exp(modelo_q05.predict(X_final_completo)) - correccion_conformal
+q05_completo_crudo = np.exp(modelo_q05.predict(X_final_completo))
 q50_completo = np.exp(modelo_q50.predict(X_final_completo))
-q95_completo = np.exp(modelo_q95.predict(X_final_completo)) + correccion_conformal
-q05_completo, q95_completo = np.minimum(q05_completo, q95_completo), np.maximum(q05_completo, q95_completo)
+q95_completo_crudo = np.exp(modelo_q95.predict(X_final_completo))
+q05_completo, q95_completo = corregir_por_segmento(q05_completo_crudo, q95_completo_crudo, q50_completo)
 
 precio_real_completo = y.to_numpy()
 flag_completo = np.select(
