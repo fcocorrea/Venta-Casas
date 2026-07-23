@@ -2821,6 +2821,8 @@ flag_completo = np.select(
 
 residuo_pct_completo = (precio_real_completo - q50_completo) / q50_completo * 100
 
+COLUMNAS_ATRIBUTOS_FILTRO = ['Dormitorios', 'Baños', 'Estacionamientos', 'Antigüedad', 'Superficie total']
+
 mapa_datos_completo = pd.DataFrame({
     'comuna': X['comuna'].to_numpy(), 'latitud': X['latitud'].to_numpy(), 'longitud': X['longitud'].to_numpy(),
     'precio_real': precio_real_completo, 'q05': q05_completo, 'q50': q50_completo, 'q95': q95_completo,
@@ -2828,6 +2830,7 @@ mapa_datos_completo = pd.DataFrame({
 }, index=X.index)
 mapa_datos_completo['fold'] = np.where(mapa_datos_completo.index.isin(indice_train), 'train', 'test')
 mapa_datos_completo = mapa_datos_completo.join(deptos_df.loc[mapa_datos_completo.index, ['url']])
+mapa_datos_completo = mapa_datos_completo.join(X[COLUMNAS_ATRIBUTOS_FILTRO])
 
 mapa_completo = folium.Map(location=[mapa_datos_completo['latitud'].mean(), mapa_datos_completo['longitud'].mean()],
                             zoom_start=12, tiles='OpenStreetMap')
@@ -2838,28 +2841,138 @@ mapa_completo = folium.Map(location=[mapa_datos_completo['latitud'].mean(), mapa
 # junto al mapa de solo test) -- cuánto más grande, más sub/sobrevalorada. La opacidad sí distingue
 # flaggeada (fuera del intervalo) de no-flaggeada. Con 5.284 puntos (5x más que el mapa de solo
 # test) hay mucha más superposición geográfica, por eso la opacidad de ambos grupos es más baja acá.
+#
+# Filtros interactivos (precio, comuna, dormitorios/baños mínimos, superficie mínima): folium no
+# trae un plugin de rango continuo, así que se arman a mano -- un array JSON con los datos de cada
+# punto (Python ya calcula color/radio/opacidad, no se duplica esa lógica en JS) más un <script>
+# que crea los círculos directamente en Leaflet (en vez de que cada uno sea un folium.CircleMarker
+# separado) y un filtro que oculta/muestra marcadores según los controles del panel, sin
+# recalcular nada del modelo -- es un filtro de VISUALIZACIÓN sobre datos ya predichos.
 
-for _, fila in mapa_datos_completo.iterrows():
+import json
+
+datos_mapa_js = []
+for idx, fila in mapa_datos_completo.iterrows():
     es_flaggeada = fila['flag'] != 'dentro_del_intervalo'
-    info_html = (f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
-                 f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
-                 f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
-                 f"Intervalo 90%: [{fila['q05']:,.0f}, {fila['q95']:,.0f}] CLP<br>"
-                 f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
-                 f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
-    folium.CircleMarker(
-        location=[fila['latitud'], fila['longitud']],
-        radius=radio_por_magnitud(fila['residuo_pct']),
-        color=color_por_residuo(fila['precio_real'], fila['q50']),
-        fill=True, fill_opacity=0.55 if es_flaggeada else 0.2,
-        opacity=0.6 if es_flaggeada else 0.25,
-        popup=folium.Popup(info_html, max_width=300),
-    ).add_to(mapa_completo)
+    popup_html = (f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
+                  f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
+                  f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
+                  f"Intervalo 90%: [{fila['q05']:,.0f}, {fila['q95']:,.0f}] CLP<br>"
+                  f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
+                  f"Dormitorios: {fila['Dormitorios']:.0f} | Baños: {fila['Baños']:.0f} | "
+                  f"Superficie total: {fila['Superficie total']:.0f} m²<br>"
+                  f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
+    datos_mapa_js.append({
+        'lat': fila['latitud'], 'lon': fila['longitud'],
+        'color': color_por_residuo(fila['precio_real'], fila['q50']),
+        'radio': radio_por_magnitud(fila['residuo_pct']),
+        'fillOpacity': 0.55 if es_flaggeada else 0.2,
+        'opacity': 0.6 if es_flaggeada else 0.25,
+        'popup': popup_html,
+        'comuna': fila['comuna'],
+        'precio': float(fila['precio_real']),
+        'dormitorios': float(fila['Dormitorios']),
+        'banos': float(fila['Baños']),
+        'superficie': float(fila['Superficie total']),
+    })
+
+precio_min_dato, precio_max_dato = mapa_datos_completo['precio_real'].min(), mapa_datos_completo['precio_real'].max()
+comunas_disponibles = sorted(mapa_datos_completo['comuna'].dropna().unique().tolist())
+nombre_js_mapa = mapa_completo.get_name()
+
+panel_filtros_html = f"""
+<div id="panel-filtros-mapa" style="position: fixed; top: 10px; right: 10px; z-index: 9999;
+     background: white; padding: 12px 14px; border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,0.4);
+     font-family: sans-serif; font-size: 13px; max-width: 230px;">
+  <b>Filtros</b>
+  <div style="margin-top: 6px;">Precio (millones CLP)</div>
+  <div style="display:flex; gap:4px;">
+    <input type="number" id="filtro-precio-min" placeholder="min" style="width:48%;"
+           value="{precio_min_dato / 1e6:.0f}">
+    <input type="number" id="filtro-precio-max" placeholder="max" style="width:48%;"
+           value="{precio_max_dato / 1e6:.0f}">
+  </div>
+  <div style="margin-top: 8px;">Dormitorios mínimos</div>
+  <input type="number" id="filtro-dorm-min" value="0" min="0" style="width:100%;">
+  <div style="margin-top: 8px;">Baños mínimos</div>
+  <input type="number" id="filtro-banos-min" value="0" min="0" style="width:100%;">
+  <div style="margin-top: 8px;">Superficie total mínima (m²)</div>
+  <input type="number" id="filtro-superficie-min" value="0" min="0" style="width:100%;">
+  <div style="margin-top: 8px;">Comuna</div>
+  {''.join(f'<div><label><input type="checkbox" class="filtro-comuna" value="{c}" checked> {c}</label></div>'
+           for c in comunas_disponibles)}
+  <button id="filtro-reset" style="margin-top: 10px; width:100%;">Restablecer</button>
+  <div id="filtro-contador" style="margin-top: 8px; color: #555;"></div>
+</div>
+"""
+
+script_filtros = f"""
+<script>
+var datosCasasMapa = {json.dumps(datos_mapa_js)};
+var marcadoresMapa = [];
+
+datosCasasMapa.forEach(function(d) {{
+    var m = L.circleMarker([d.lat, d.lon], {{
+        radius: d.radio, color: d.color, fill: true,
+        fillOpacity: d.fillOpacity, opacity: d.opacity, weight: 2,
+    }}).bindPopup(d.popup);
+    m._datos = d;
+    m.addTo({nombre_js_mapa});
+    marcadoresMapa.push(m);
+}});
+
+function aplicarFiltrosMapaCompleto() {{
+    var precioMin = (parseFloat(document.getElementById('filtro-precio-min').value) || 0) * 1e6;
+    var precioMax = (parseFloat(document.getElementById('filtro-precio-max').value) || Infinity) * 1e6;
+    var dormMin = parseFloat(document.getElementById('filtro-dorm-min').value) || 0;
+    var banosMin = parseFloat(document.getElementById('filtro-banos-min').value) || 0;
+    var superficieMin = parseFloat(document.getElementById('filtro-superficie-min').value) || 0;
+    var comunasSeleccionadas = Array.from(document.querySelectorAll('.filtro-comuna:checked')).map(function(el) {{ return el.value; }});
+
+    var visibles = 0;
+    marcadoresMapa.forEach(function(m) {{
+        var d = m._datos;
+        var visible = d.precio >= precioMin && d.precio <= precioMax &&
+                      d.dormitorios >= dormMin && d.banos >= banosMin &&
+                      d.superficie >= superficieMin && comunasSeleccionadas.indexOf(d.comuna) !== -1;
+        if (visible) {{
+            if (!{nombre_js_mapa}.hasLayer(m)) {{ m.addTo({nombre_js_mapa}); }}
+            visibles++;
+        }} else {{
+            if ({nombre_js_mapa}.hasLayer(m)) {{ {nombre_js_mapa}.removeLayer(m); }}
+        }}
+    }});
+    document.getElementById('filtro-contador').innerText = visibles + ' de ' + marcadoresMapa.length + ' casas';
+}}
+
+['filtro-precio-min', 'filtro-precio-max', 'filtro-dorm-min', 'filtro-banos-min', 'filtro-superficie-min'].forEach(function(id) {{
+    document.getElementById(id).addEventListener('input', aplicarFiltrosMapaCompleto);
+}});
+document.querySelectorAll('.filtro-comuna').forEach(function(el) {{
+    el.addEventListener('change', aplicarFiltrosMapaCompleto);
+}});
+document.getElementById('filtro-reset').addEventListener('click', function() {{
+    document.getElementById('filtro-precio-min').value = {precio_min_dato / 1e6:.0f};
+    document.getElementById('filtro-precio-max').value = {precio_max_dato / 1e6:.0f};
+    document.getElementById('filtro-dorm-min').value = 0;
+    document.getElementById('filtro-banos-min').value = 0;
+    document.getElementById('filtro-superficie-min').value = 0;
+    document.querySelectorAll('.filtro-comuna').forEach(function(el) {{ el.checked = true; }});
+    aplicarFiltrosMapaCompleto();
+}});
+
+aplicarFiltrosMapaCompleto();
+</script>
+"""
+
+mapa_completo.get_root().html.add_child(folium.Element(panel_filtros_html))
+mapa_completo.get_root().html.add_child(folium.Element(script_filtros))
 
 mapa_completo.save(MAPA_COMPLETO_HTML)
 print(f'{MAPA_COMPLETO_HTML}: {len(mapa_datos_completo)} casas graficadas (train+test) '
       f'({(mapa_datos_completo["flag"] != "dentro_del_intervalo").sum()} flaggeadas) -- '
-      f'diagnóstico, no tiene garantía de cobertura para las filas de train.')
+      f'diagnóstico, no tiene garantía de cobertura para las filas de train. '
+      f'Filtros interactivos: precio, comuna, dormitorios/baños/superficie mínimos.')
 
 # =======================================================================================
 # PASO 5j -- LÍMITES: QUÉ NO PUEDE RESPONDER ESTE MODELO
