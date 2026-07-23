@@ -25,8 +25,8 @@
 #
 # Implementación, en cinco grandes pasos (numeración alineada 1:1 con los PASO del código: el
 # paso N de acá es PASO N más abajo, sin desfase):
-# 1) Obtención de datos: se extraen vía web scraping con Scrapy (ver deptos_scraper/spiders/deptos.py;
-#    se ejecuta con `scrapy crawl deptos -O deptos.json`, documentado en CLAUDE.md).
+# 1) Obtención de datos: se extraen vía web scraping con Scrapy (ver casas_scraper/spiders/casas.py;
+#    se ejecuta con `scrapy crawl casas -O casas.json`, documentado en CLAUDE.md).
 # 2) Limpieza de datos: homologar y transformar los datos, que no vienen expresados de forma
 #    consistente. Las imputaciones que aprenden de los datos (KDTree de comuna/barrio, moda por
 #    barrio, match por correlación en atributos discretos, umbrales de outlier) se ajustan SOLO
@@ -61,11 +61,11 @@ os.makedirs(GRAFICOS_DIR, exist_ok=True)
 # =======================================================================================
 # PASO 1 -- OBTENCIÓN DE DATOS
 # =======================================================================================
-# El scraping en sí corre fuera de este script, vía Scrapy (deptos_scraper/spiders/deptos.py,
-# `scrapy crawl deptos -O deptos.json`). Este archivo retoma el proceso desde
+# El scraping en sí corre fuera de este script, vía Scrapy (casas_scraper/spiders/casas.py,
+# `scrapy crawl casas -O casas.json`). Este archivo retoma el proceso desde
 # el JSON ya scrapeado: no hace requests HTTP, solo lee lo que el crawl dejó en disco.
 
-deptos_df = pd.read_json('deptos.json')
+deptos_df = pd.read_json('casas.json')
 print('Cantidad de observaciones: {}.\nCantidad de atributos: {}.'.format(*deptos_df.shape))
 print('Columnas:', ', '.join(deptos_df.columns.tolist()))
 
@@ -855,7 +855,7 @@ g.savefig(os.path.join(GRAFICOS_DIR, 'precio_unitario_vs_antiguedad.png'))
 
 # Generamos un CSV con los datos limpios, para no tener que repetir todo el proceso de limpieza cada vez.
 # Se ordena por precio unitario ascendente por defecto.
-deptos_df.sort_values('precio unitario').to_excel('deptos_limpios.xlsx', index=False)
+deptos_df.sort_values('precio unitario').to_excel('casas_limpios.xlsx', index=False)
 
 # Análisis de la base ya limpia:
 # antes de diseñar el preprocesamiento (PASO 4), revisamos la forma final del dataset -- dtypes,
@@ -894,7 +894,7 @@ print(deptos_df.describe())
 # PASO 4 -- ESTRATEGIA DE PREPROCESAMIENTO PARA EL MODELO (diseño, aún no implementado)
 # =======================================================================================
 #
-# Punto de partida medido sobre deptos_limpios.xlsx (5.284 filas x 74 columnas, ver análisis de
+# Punto de partida medido sobre casas_limpios.xlsx (5.284 filas x 74 columnas, ver análisis de
 # info()/describe() más arriba), no supuesto: sin nulos en ninguna columna, pero con tres
 # problemas que condicionan todo lo que sigue.
 #
@@ -1229,7 +1229,7 @@ print(f'MdAPE sin texto: {mdape_sin_texto:.2f}%')
 # Limpieza de 'descripcion' antes de vectorizar: el texto libre suele mencionar precio o
 # superficie (ej. "terreno de 306 m²", "$457.000", "18.000 UF") -- eso es fuga directa del
 # target, ya que 'clp'/'Superficie total' son justamente lo que se quiere predecir/ya está en el
-# feature set. Se valida contra una muestra real de deptos.json: 200 de 400 descripciones (50%)
+# feature set. Se valida contra una muestra real de casas.json: 200 de 400 descripciones (50%)
 # traen al menos una mención así, y el patrón scrubbea números seguidos de m²/m2/metros/UF/CLP/$
 # sin tocar el resto del texto (algún falso positivo inofensivo, ej. "jardín de 10 metros de
 # fondo", se pierde -- preferible a dejar pasar una fuga real). Además se bajan a minúscula y se

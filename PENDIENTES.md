@@ -2,20 +2,22 @@
 
 Documento de traspaso. Última actualización: **2026-07-23**.
 
-Todo lo que dice "medido" acá se corrió de verdad contra `deptos.json` (5.603 avisos) en el venv
+Todo lo que dice "medido" acá se corrió de verdad contra `casas.json` (5.603 avisos, antes
+`deptos.json` -- renombrado 2026-07-23 junto con `proyecto_deptos.py` -> `proyecto_casas.py` y
+`deptos_scraper/` -> `casas_scraper/`, ver sección 2) en el venv
 del proyecto. Lo que no está medido dice explícitamente que es estimación.
 
 ---
 
 ## 1. Dónde quedó el proyecto
 
-`proyecto_deptos.py` (2.207 líneas) corre limpio de punta a punta. Pipeline completo:
+`proyecto_casas.py` (2.200+ líneas) corre limpio de punta a punta. Pipeline completo:
 
 ```
-PASO 1  Lectura de deptos.json
+PASO 1  Lectura de casas.json
 PASO 2  Limpieza determinista + filtrado de filas
 PASO 2b SPLIT train/test + ajustar_imputacion()/aplicar_imputacion() (refit por fold, ver PASO 5a)
-PASO 3  Exploración (EDA) + deptos_limpios.xlsx
+PASO 3  Exploración (EDA) + casas_limpios.xlsx
 PASO 4a Selección de columnas          4g Colinealidad (VIF, sin PCA)
 PASO 4b Codificación de categóricas    4h Baseline mediana precio/m² por barrio
 PASO 4c Validación de texto (rechazado) 4i Binaria gastos_comunes_informado
@@ -151,7 +153,7 @@ del comprador, placeholders configurables, aplicados sobre el ranking) también 
 
 ### ✅ P2 — PASO 5e-5i implementados (2026-07-23); solo 5b-5d siguen pendientes
 
-PASO 5 tiene un bloque de diseño completo (comentarios) en `proyecto_deptos.py` con sub-pasos
+PASO 5 tiene un bloque de diseño completo (comentarios) en `proyecto_casas.py` con sub-pasos
 5a-5j. Implementados: **5a** (CV, ver P3), **5e** (intervalos, ver P1), **5f** (residuo/flag/
 ranking), **5g** (filtros del comprador), **5h** (export `casas_candidatas.xlsx` -- solo filas
 flaggeadas de test, 88 filas medido: 31 subvaloradas + 57 sobrevaloradas), **5i** (mapa interactivo,
@@ -268,7 +270,7 @@ no solo en los deciles caros.
 
 ### ✅ P7 — Corregir `tiene_gastos_comunes` (resuelto 2026-07-23)
 
-Renombrada a `gastos_comunes_informado` en PASO 4i (línea ~1582 de `proyecto_deptos.py`), que es lo
+Renombrada a `gastos_comunes_informado` en PASO 4i (línea ~1582 de `proyecto_casas.py`), que es lo
 que la columna mide de verdad (ver hallazgo original abajo). Se optó por renombrar en vez de
 eliminar: aunque su importancia por permutación medida es 0,000000 hoy, "el corredor no informó el
 dato" puede seguir siendo señal en otro modelo o con más datos, y el nombre ya no engaña sobre qué

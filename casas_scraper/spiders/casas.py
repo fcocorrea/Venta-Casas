@@ -9,8 +9,8 @@ DESDE_RE = re.compile(r'_Desde_\d+')
 COORDS_RE = re.compile(r'center=(-?[\d.]+)%2C(-?[\d.]+)')
 
 
-class DeptosSpider(scrapy.Spider):
-    name = "deptos"
+class CasasSpider(scrapy.Spider):
+    name = "casas"
 
     def start_requests(self):
         urls = ('https://www.portalinmobiliario.com/venta/casa/vitacura-metropolitana/',

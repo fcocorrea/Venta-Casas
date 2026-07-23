@@ -1,4 +1,4 @@
-# Scrapy settings for deptos_scraper project
+# Scrapy settings for casas_scraper project
 #
 # For simplicity, this file contains only settings considered important or
 # commonly used. You can find more settings consulting the documentation:
@@ -7,10 +7,10 @@
 #     https://docs.scrapy.org/en/latest/topics/downloader-middleware.html
 #     https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 
-BOT_NAME = "deptos_scraper"
+BOT_NAME = "casas_scraper"
 
-SPIDER_MODULES = ["deptos_scraper.spiders"]
-NEWSPIDER_MODULE = "deptos_scraper.spiders"
+SPIDER_MODULES = ["casas_scraper.spiders"]
+NEWSPIDER_MODULE = "casas_scraper.spiders"
 
 
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
@@ -45,13 +45,13 @@ DOWNLOAD_DELAY = 1.5
 # Enable or disable spider middlewares
 # See https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 #SPIDER_MIDDLEWARES = {
-#    "deptos_scraper.middlewares.DeptosScraperSpiderMiddleware": 543,
+#    "casas_scraper.middlewares.CasasScraperSpiderMiddleware": 543,
 #}
 
 # Enable or disable downloader middlewares
 # See https://docs.scrapy.org/en/latest/topics/downloader-middleware.html
 #DOWNLOADER_MIDDLEWARES = {
-#    "deptos_scraper.middlewares.DeptosScraperDownloaderMiddleware": 543,
+#    "casas_scraper.middlewares.CasasScraperDownloaderMiddleware": 543,
 #}
 
 # Enable or disable extensions
@@ -63,7 +63,7 @@ DOWNLOAD_DELAY = 1.5
 # Configure item pipelines
 # See https://docs.scrapy.org/en/latest/topics/item-pipeline.html
 #ITEM_PIPELINES = {
-#    "deptos_scraper.pipelines.DeptosScraperPipeline": 300,
+#    "casas_scraper.pipelines.CasasScraperPipeline": 300,
 #}
 
 # Enable and configure the AutoThrottle extension (disabled by default)
