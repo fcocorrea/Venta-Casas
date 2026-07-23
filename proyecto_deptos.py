@@ -2876,38 +2876,167 @@ for idx, fila in mapa_datos_completo.iterrows():
         'superficie': float(fila['Superficie total']),
     })
 
+# Barra horizontal fija arriba, con un grupo por filtro que despliega un panel con slider de
+# doble tirador (min/max) al pasar el mouse o al hacer click/tab (para touch/teclado, ver JS) --
+# a pedido explícito, reemplaza el panel flotante simple de la versión anterior. Sin Tailwind ni
+# CDN: este HTML tiene que abrirse offline como archivo local, así que el CSS va inline, sin
+# dependencias externas que puedan fallar sin internet.
+
 precio_min_dato, precio_max_dato = mapa_datos_completo['precio_real'].min(), mapa_datos_completo['precio_real'].max()
+precio_min_millones = int(np.floor(precio_min_dato / 1e6))
+precio_max_millones = int(np.ceil(precio_max_dato / 1e6))
+dorm_max_dato = int(mapa_datos_completo['Dormitorios'].max())
+banos_max_dato = int(mapa_datos_completo['Baños'].max())
+superficie_max_dato = int(np.ceil(mapa_datos_completo['Superficie total'].max() / 10) * 10)
 comunas_disponibles = sorted(mapa_datos_completo['comuna'].dropna().unique().tolist())
 nombre_js_mapa = mapa_completo.get_name()
 
-panel_filtros_html = f"""
-<div id="panel-filtros-mapa" style="position: fixed; top: 10px; right: 10px; z-index: 9999;
-     background: white; padding: 12px 14px; border-radius: 8px; box-shadow: 0 1px 6px rgba(0,0,0,0.4);
-     font-family: sans-serif; font-size: 13px; max-width: 230px;">
-  <b>Filtros</b>
-  <div style="margin-top: 6px;">Precio (millones CLP)</div>
-  <div style="display:flex; gap:4px;">
-    <input type="number" id="filtro-precio-min" placeholder="min" style="width:48%;"
-           value="{precio_min_dato / 1e6:.0f}">
-    <input type="number" id="filtro-precio-max" placeholder="max" style="width:48%;"
-           value="{precio_max_dato / 1e6:.0f}">
+ALTO_TOOLBAR_PX = 52
+
+css_toolbar = """
+<style>
+#toolbar-filtros, #toolbar-filtros * { box-sizing: border-box; }
+#toolbar-filtros {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 10000;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+  min-height: 52px; padding: 6px 16px;
+  background: #ffffff; border-bottom: 1px solid #E5E7EB;
+  box-shadow: 0 1px 3px rgba(15,23,22,0.08);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px; color: #111827;
+}
+.vd-brand {
+  font-weight: 600; font-size: 13px; color: #0F766E;
+  margin-right: 12px; white-space: nowrap; letter-spacing: 0.01em;
+}
+.vd-group { position: relative; }
+.vd-group__button {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  padding: 5px 12px; cursor: pointer; line-height: 1.25; font-family: inherit;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.vd-group:hover .vd-group__button, .vd-group.vd-abierto .vd-group__button, .vd-group:focus-within .vd-group__button {
+  background: #F0FDFA; border-color: #99F6E4;
+}
+.vd-group__label {
+  font-size: 10.5px; color: #6B7280; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.vd-group__value { font-size: 13px; color: #374151; font-weight: 500; }
+.vd-group__value--activo { color: #0F766E; font-weight: 700; }
+.vd-panel {
+  position: absolute; top: calc(100% + 6px); left: 0; min-width: 230px;
+  background: #ffffff; border: 1px solid #E5E7EB; border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(15,23,22,0.14);
+  padding: 16px; opacity: 0; visibility: hidden; transform: translateY(-4px);
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
+  z-index: 10001;
+}
+.vd-group:hover .vd-panel, .vd-group.vd-abierto .vd-panel, .vd-group:focus-within .vd-panel {
+  opacity: 1; visibility: visible; transform: translateY(0);
+}
+.vd-slider { position: relative; height: 28px; margin: 10px 2px 2px; }
+.vd-slider__track {
+  position: absolute; top: 50%; left: 0; right: 0; height: 4px;
+  background: #E5E7EB; border-radius: 2px; transform: translateY(-50%);
+}
+.vd-slider__fill {
+  position: absolute; top: 50%; height: 4px; background: #0F766E;
+  border-radius: 2px; transform: translateY(-50%);
+}
+.vd-slider input[type="range"] {
+  position: absolute; top: 0; left: 0; width: 100%; margin: 0; height: 28px;
+  -webkit-appearance: none; appearance: none; background: none; pointer-events: none;
+}
+.vd-slider input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; pointer-events: auto;
+  width: 16px; height: 16px; border-radius: 50%; margin-top: 4px;
+  background: #ffffff; border: 2px solid #0F766E; cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+.vd-slider input[type="range"]::-moz-range-thumb {
+  pointer-events: auto; width: 16px; height: 16px; border-radius: 50%;
+  background: #ffffff; border: 2px solid #0F766E; cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+.vd-slider input[type="range"]::-webkit-slider-runnable-track { background: transparent; }
+.vd-slider input[type="range"]::-moz-range-track { background: transparent; }
+.vd-slider input[type="range"]:focus-visible::-webkit-slider-thumb { outline: 2px solid #0F766E; outline-offset: 2px; }
+.vd-slider-values { display: flex; justify-content: space-between; font-size: 12px; color: #374151; margin-top: 2px; }
+.vd-checklist { display: flex; flex-direction: column; }
+.vd-checklist label { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 13px; cursor: pointer; }
+.vd-reset {
+  margin-left: auto; background: none; border: 1px solid #E5E7EB; border-radius: 6px;
+  padding: 6px 12px; font-size: 12px; color: #6B7280; cursor: pointer; font-family: inherit;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.vd-reset:hover { border-color: #0F766E; color: #0F766E; }
+.vd-counter { font-size: 12px; color: #6B7280; white-space: nowrap; margin-left: 12px; }
+@media (max-width: 760px) {
+  #toolbar-filtros { padding: 8px 10px; }
+  .vd-counter { margin-left: 0; width: 100%; order: 99; }
+}
+</style>
+"""
+
+checkboxes_comuna_html = ''.join(
+    f'<label><input type="checkbox" class="vd-comuna" value="{c}" checked> {c}</label>'
+    for c in comunas_disponibles
+)
+
+
+def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, paso: int = 1) -> str:
+    return f"""
+  <div class="vd-group" data-grupo="{prefijo}">
+    <button type="button" class="vd-group__button">
+      <span class="vd-group__label">{etiqueta}</span>
+      <span class="vd-group__value" id="resumen-{prefijo}">Todos</span>
+    </button>
+    <div class="vd-panel">
+      <div class="vd-slider">
+        <div class="vd-slider__track"></div>
+        <div class="vd-slider__fill" id="relleno-{prefijo}"></div>
+        <input type="range" id="rango-{prefijo}-min" min="{valor_min}" max="{valor_max}" value="{valor_min}" step="{paso}">
+        <input type="range" id="rango-{prefijo}-max" min="{valor_min}" max="{valor_max}" value="{valor_max}" step="{paso}">
+      </div>
+      <div class="vd-slider-values">
+        <span id="texto-{prefijo}-min"></span>
+        <span id="texto-{prefijo}-max"></span>
+      </div>
+    </div>
   </div>
-  <div style="margin-top: 8px;">Dormitorios mínimos</div>
-  <input type="number" id="filtro-dorm-min" value="0" min="0" style="width:100%;">
-  <div style="margin-top: 8px;">Baños mínimos</div>
-  <input type="number" id="filtro-banos-min" value="0" min="0" style="width:100%;">
-  <div style="margin-top: 8px;">Superficie total mínima (m²)</div>
-  <input type="number" id="filtro-superficie-min" value="0" min="0" style="width:100%;">
-  <div style="margin-top: 8px;">Comuna</div>
-  {''.join(f'<div><label><input type="checkbox" class="filtro-comuna" value="{c}" checked> {c}</label></div>'
-           for c in comunas_disponibles)}
-  <button id="filtro-reset" style="margin-top: 10px; width:100%;">Restablecer</button>
-  <div id="filtro-contador" style="margin-top: 8px; color: #555;"></div>
+"""
+
+
+html_toolbar = f"""
+<div id="toolbar-filtros">
+  <span class="vd-brand">Casas — filtros</span>
+  {bloque_slider('precio', 'Precio (M CLP)', precio_min_millones, precio_max_millones)}
+  {bloque_slider('dormitorios', 'Dormitorios', 0, dorm_max_dato)}
+  {bloque_slider('banos', 'Baños', 0, banos_max_dato)}
+  {bloque_slider('superficie', 'Superficie (m²)', 0, superficie_max_dato, paso=5)}
+  <div class="vd-group" data-grupo="comuna">
+    <button type="button" class="vd-group__button">
+      <span class="vd-group__label">Comuna</span>
+      <span class="vd-group__value" id="resumen-comuna">Todas</span>
+    </button>
+    <div class="vd-panel vd-checklist">
+      {checkboxes_comuna_html}
+    </div>
+  </div>
+  <button type="button" class="vd-reset" id="filtro-reset">Restablecer</button>
+  <span class="vd-counter" id="filtro-contador"></span>
 </div>
 """
 
 script_filtros = f"""
-<script>
+window.addEventListener('load', function() {{
+// Diferido a 'load': el bloque .script de folium concatena el código de todos los elementos en UN
+// solo <script>, y el nuestro queda ANTES de la línea que asigna `{nombre_js_mapa}` -- por
+// hoisting de `var`, el nombre ya existe pero vale `undefined` ahí, así que `.addTo({nombre_js_mapa})`
+// fallaba con "Cannot read properties of undefined (reading 'addLayer')". Esperar a 'load'
+// garantiza que la asignación real ya corrió, sea cual sea el orden interno de folium/branca.
 var datosCasasMapa = {json.dumps(datos_mapa_js)};
 var marcadoresMapa = [];
 
@@ -2922,19 +3051,24 @@ datosCasasMapa.forEach(function(d) {{
 }});
 
 function aplicarFiltrosMapaCompleto() {{
-    var precioMin = (parseFloat(document.getElementById('filtro-precio-min').value) || 0) * 1e6;
-    var precioMax = (parseFloat(document.getElementById('filtro-precio-max').value) || Infinity) * 1e6;
-    var dormMin = parseFloat(document.getElementById('filtro-dorm-min').value) || 0;
-    var banosMin = parseFloat(document.getElementById('filtro-banos-min').value) || 0;
-    var superficieMin = parseFloat(document.getElementById('filtro-superficie-min').value) || 0;
-    var comunasSeleccionadas = Array.from(document.querySelectorAll('.filtro-comuna:checked')).map(function(el) {{ return el.value; }});
+    var precioMin = parseFloat(document.getElementById('rango-precio-min').value) * 1e6;
+    var precioMax = parseFloat(document.getElementById('rango-precio-max').value) * 1e6;
+    var dormMin = parseFloat(document.getElementById('rango-dormitorios-min').value);
+    var dormMax = parseFloat(document.getElementById('rango-dormitorios-max').value);
+    var banosMin = parseFloat(document.getElementById('rango-banos-min').value);
+    var banosMax = parseFloat(document.getElementById('rango-banos-max').value);
+    var superficieMin = parseFloat(document.getElementById('rango-superficie-min').value);
+    var superficieMax = parseFloat(document.getElementById('rango-superficie-max').value);
+    var comunasSeleccionadas = Array.from(document.querySelectorAll('.vd-comuna:checked')).map(function(el) {{ return el.value; }});
 
     var visibles = 0;
     marcadoresMapa.forEach(function(m) {{
         var d = m._datos;
         var visible = d.precio >= precioMin && d.precio <= precioMax &&
-                      d.dormitorios >= dormMin && d.banos >= banosMin &&
-                      d.superficie >= superficieMin && comunasSeleccionadas.indexOf(d.comuna) !== -1;
+                      d.dormitorios >= dormMin && d.dormitorios <= dormMax &&
+                      d.banos >= banosMin && d.banos <= banosMax &&
+                      d.superficie >= superficieMin && d.superficie <= superficieMax &&
+                      comunasSeleccionadas.indexOf(d.comuna) !== -1;
         if (visible) {{
             if (!{nombre_js_mapa}.hasLayer(m)) {{ m.addTo({nombre_js_mapa}); }}
             visibles++;
@@ -2945,28 +3079,99 @@ function aplicarFiltrosMapaCompleto() {{
     document.getElementById('filtro-contador').innerText = visibles + ' de ' + marcadoresMapa.length + ' casas';
 }}
 
-['filtro-precio-min', 'filtro-precio-max', 'filtro-dorm-min', 'filtro-banos-min', 'filtro-superficie-min'].forEach(function(id) {{
-    document.getElementById(id).addEventListener('input', aplicarFiltrosMapaCompleto);
-}});
-document.querySelectorAll('.filtro-comuna').forEach(function(el) {{
-    el.addEventListener('change', aplicarFiltrosMapaCompleto);
-}});
-document.getElementById('filtro-reset').addEventListener('click', function() {{
-    document.getElementById('filtro-precio-min').value = {precio_min_dato / 1e6:.0f};
-    document.getElementById('filtro-precio-max').value = {precio_max_dato / 1e6:.0f};
-    document.getElementById('filtro-dorm-min').value = 0;
-    document.getElementById('filtro-banos-min').value = 0;
-    document.getElementById('filtro-superficie-min').value = 0;
-    document.querySelectorAll('.filtro-comuna').forEach(function(el) {{ el.checked = true; }});
+function configurarSliderDual(prefijo, formatearValor) {{
+    var elMin = document.getElementById('rango-' + prefijo + '-min');
+    var elMax = document.getElementById('rango-' + prefijo + '-max');
+    var relleno = document.getElementById('relleno-' + prefijo);
+    var textoMin = document.getElementById('texto-' + prefijo + '-min');
+    var textoMax = document.getElementById('texto-' + prefijo + '-max');
+    var resumen = document.getElementById('resumen-' + prefijo);
+    var limiteMin = parseFloat(elMin.min), limiteMax = parseFloat(elMin.max);
+
+    function actualizar() {{
+        var vMin = parseFloat(elMin.value), vMax = parseFloat(elMax.value);
+        var pctMin = (vMin - limiteMin) / (limiteMax - limiteMin) * 100;
+        var pctMax = (vMax - limiteMin) / (limiteMax - limiteMin) * 100;
+        relleno.style.left = pctMin + '%';
+        relleno.style.width = Math.max(pctMax - pctMin, 0) + '%';
+        textoMin.innerText = formatearValor(vMin);
+        textoMax.innerText = formatearValor(vMax);
+        var esDefault = vMin <= limiteMin && vMax >= limiteMax;
+        resumen.innerText = esDefault ? 'Todos' : (formatearValor(vMin) + ' – ' + formatearValor(vMax));
+        resumen.classList.toggle('vd-group__value--activo', !esDefault);
+        aplicarFiltrosMapaCompleto();
+    }}
+
+    elMin.addEventListener('input', function() {{
+        if (parseFloat(elMin.value) > parseFloat(elMax.value)) {{ elMax.value = elMin.value; }}
+        actualizar();
+    }});
+    elMax.addEventListener('input', function() {{
+        if (parseFloat(elMax.value) < parseFloat(elMin.value)) {{ elMin.value = elMax.value; }}
+        actualizar();
+    }});
+
+    actualizar();
+    return {{ reset: function() {{ elMin.value = limiteMin; elMax.value = limiteMax; actualizar(); }} }};
+}}
+
+var sliderPrecio = configurarSliderDual('precio', function(v) {{ return v.toFixed(0) + 'M'; }});
+var sliderDormitorios = configurarSliderDual('dormitorios', function(v) {{ return v.toFixed(0); }});
+var sliderBanos = configurarSliderDual('banos', function(v) {{ return v.toFixed(0); }});
+var sliderSuperficie = configurarSliderDual('superficie', function(v) {{ return v.toFixed(0) + 'm²'; }});
+
+function actualizarResumenComuna() {{
+    var todas = document.querySelectorAll('.vd-comuna');
+    var marcadas = document.querySelectorAll('.vd-comuna:checked');
+    var resumen = document.getElementById('resumen-comuna');
+    if (marcadas.length === todas.length) {{
+        resumen.innerText = 'Todas'; resumen.classList.remove('vd-group__value--activo');
+    }} else {{
+        resumen.innerText = marcadas.length + ' de ' + todas.length;
+        resumen.classList.add('vd-group__value--activo');
+    }}
     aplicarFiltrosMapaCompleto();
+}}
+document.querySelectorAll('.vd-comuna').forEach(function(el) {{ el.addEventListener('change', actualizarResumenComuna); }});
+
+// Click/touch (además de hover) para abrir el panel -- clave para dispositivos táctiles, donde no
+// existe :hover. Clickear fuera de la barra cierra cualquier panel abierto.
+document.querySelectorAll('.vd-group__button').forEach(function(boton) {{
+    boton.addEventListener('click', function() {{
+        var grupo = boton.closest('.vd-group');
+        var yaAbierto = grupo.classList.contains('vd-abierto');
+        document.querySelectorAll('.vd-group.vd-abierto').forEach(function(g) {{ g.classList.remove('vd-abierto'); }});
+        if (!yaAbierto) {{ grupo.classList.add('vd-abierto'); }}
+    }});
+}});
+document.addEventListener('click', function(e) {{
+    if (!e.target.closest('#toolbar-filtros')) {{
+        document.querySelectorAll('.vd-group.vd-abierto').forEach(function(g) {{ g.classList.remove('vd-abierto'); }});
+    }}
 }});
 
-aplicarFiltrosMapaCompleto();
-</script>
+document.getElementById('filtro-reset').addEventListener('click', function() {{
+    sliderPrecio.reset(); sliderDormitorios.reset(); sliderBanos.reset(); sliderSuperficie.reset();
+    document.querySelectorAll('.vd-comuna').forEach(function(el) {{ el.checked = true; }});
+    actualizarResumenComuna();
+}});
+
+document.getElementById('{nombre_js_mapa}').style.marginTop = '{ALTO_TOOLBAR_PX}px';
+document.getElementById('{nombre_js_mapa}').style.height = 'calc(100% - {ALTO_TOOLBAR_PX}px)';
+// Leaflet cachea el tamaño del contenedor al crear el mapa (antes de este resize) -- sin
+// invalidateSize() los tiles quedan mal recortados/grises hasta la primera interacción manual.
+{nombre_js_mapa}.invalidateSize();
+}});
 """
 
-mapa_completo.get_root().html.add_child(folium.Element(panel_filtros_html))
-mapa_completo.get_root().html.add_child(folium.Element(script_filtros))
+mapa_completo.get_root().html.add_child(folium.Element(css_toolbar))
+mapa_completo.get_root().html.add_child(folium.Element(html_toolbar))
+# `script_filtros` va en `.script`, no en `.html`: `.html` se renderiza ANTES de que el propio
+# folium cree el mapa Leaflet (el `<script>` que define la variable `{nombre_js_mapa}`), así que
+# referenciar esa variable desde `.html` fallaba con "map_xxx is not defined". `.script` es el
+# bloque que folium ya reserva para código que corre DESPUÉS de que el mapa y sus capas existen --
+# mismo lugar donde folium mete sus propias llamadas de creación de marcadores.
+mapa_completo.get_root().script.add_child(folium.Element(script_filtros))
 
 mapa_completo.save(MAPA_COMPLETO_HTML)
 print(f'{MAPA_COMPLETO_HTML}: {len(mapa_datos_completo)} casas graficadas (train+test) '
