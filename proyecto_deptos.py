@@ -2506,6 +2506,17 @@ def color_por_residuo(precio_real: float, q50: float) -> str:
     return 'red' if precio_real >= q50 else 'green'
 
 
+RADIO_MINIMO, RADIO_MAXIMO, FACTOR_RADIO = 3, 18, 0.15
+
+
+def radio_por_magnitud(residuo_pct: float) -> float:
+    """Radio proporcional a |residuo_pct| -- a pedido explícito: cuánto más grande el círculo, más
+    sub/sobrevalorada está la casa, no solo si está o no flaggeada. Lineal y acotado entre
+    RADIO_MINIMO y RADIO_MAXIMO para que un outlier extremo (residuo p99 medido: +71,8 %, ver PASO
+    5d) no vuelva ilegibles los círculos de alrededor."""
+    return min(RADIO_MINIMO + abs(residuo_pct) * FACTOR_RADIO, RADIO_MAXIMO)
+
+
 mapa_datos = ranking_filtrado.join(X_test[['latitud', 'longitud']])
 mapa_datos = mapa_datos.join(deptos_df.loc[mapa_datos.index, ['url']])
 
@@ -2513,19 +2524,19 @@ mapa = folium.Map(location=[mapa_datos['latitud'].mean(), mapa_datos['longitud']
                    zoom_start=12, tiles='OpenStreetMap')
 
 for _, fila in mapa_datos.iterrows():
-    # El color ya no distingue flaggeada/no-flaggeada (ver color_por_residuo) -- esa distinción se
-    # conserva en el tamaño/opacidad: las flaggeadas (fuera del intervalo de 5e) se ven más grandes
-    # y sólidas, el resto más chicas y tenues, para no perder del todo la señal de "esto es un caso
-    # extremo" vs. "esto está apenas a un lado de la mediana".
+    # El color no distingue flaggeada/no-flaggeada (ver color_por_residuo) -- esa distinción se
+    # conserva en la opacidad (flaggeadas más sólidas). El TAMAÑO ahora es continuo, proporcional
+    # a la magnitud del residuo (ver radio_por_magnitud), no binario por flag.
     es_flaggeada = fila['flag'] != 'dentro_del_intervalo'
     tooltip = (f"<b>{fila['comuna']}</b><br>"
                f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
                f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
                f"Intervalo 90%: [{fila['q05']:,.0f}, {fila['q95']:,.0f}] CLP<br>"
+               f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
                f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
     folium.CircleMarker(
         location=[fila['latitud'], fila['longitud']],
-        radius=6 if es_flaggeada else 3,
+        radius=radio_por_magnitud(fila['residuo_pct']),
         color=color_por_residuo(fila['precio_real'], fila['q50']),
         fill=True, fill_opacity=0.75 if es_flaggeada else 0.35,
         opacity=0.85 if es_flaggeada else 0.4,
@@ -2571,10 +2582,12 @@ flag_completo = np.select(
     default='dentro_del_intervalo',
 )
 
+residuo_pct_completo = (precio_real_completo - q50_completo) / q50_completo * 100
+
 mapa_datos_completo = pd.DataFrame({
     'comuna': X['comuna'].to_numpy(), 'latitud': X['latitud'].to_numpy(), 'longitud': X['longitud'].to_numpy(),
     'precio_real': precio_real_completo, 'q05': q05_completo, 'q50': q50_completo, 'q95': q95_completo,
-    'flag': flag_completo,
+    'residuo_pct': residuo_pct_completo, 'flag': flag_completo,
 }, index=X.index)
 mapa_datos_completo['fold'] = np.where(mapa_datos_completo.index.isin(indice_train), 'train', 'test')
 mapa_datos_completo = mapa_datos_completo.join(deptos_df.loc[mapa_datos_completo.index, ['url']])
@@ -2584,10 +2597,10 @@ mapa_completo = folium.Map(location=[mapa_datos_completo['latitud'].mean(), mapa
 
 # Color por signo del residuo contra q50 (ver color_por_residuo, definida junto al mapa de solo
 # test) -- sin gris, toda casa se clasifica rojo/verde. 'fold' nunca entra en el color, train y
-# test comparten el mismo criterio. Igual que en el mapa de test, el tamaño/opacidad sí distingue
-# flaggeada (fuera del intervalo) de no-flaggeada, para no perder esa señal. Con 5.284 puntos (5x
-# más que el mapa de solo test) hay mucha más superposición geográfica, por eso la opacidad de
-# ambos grupos es más baja acá que en el mapa de test.
+# test comparten el mismo criterio. El tamaño es continuo (ver radio_por_magnitud, misma definida
+# junto al mapa de solo test) -- cuánto más grande, más sub/sobrevalorada. La opacidad sí distingue
+# flaggeada (fuera del intervalo) de no-flaggeada. Con 5.284 puntos (5x más que el mapa de solo
+# test) hay mucha más superposición geográfica, por eso la opacidad de ambos grupos es más baja acá.
 
 for _, fila in mapa_datos_completo.iterrows():
     es_flaggeada = fila['flag'] != 'dentro_del_intervalo'
@@ -2595,10 +2608,11 @@ for _, fila in mapa_datos_completo.iterrows():
                f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
                f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
                f"Intervalo 90%: [{fila['q05']:,.0f}, {fila['q95']:,.0f}] CLP<br>"
+               f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
                f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
     folium.CircleMarker(
         location=[fila['latitud'], fila['longitud']],
-        radius=6 if es_flaggeada else 3,
+        radius=radio_por_magnitud(fila['residuo_pct']),
         color=color_por_residuo(fila['precio_real'], fila['q50']),
         fill=True, fill_opacity=0.55 if es_flaggeada else 0.2,
         opacity=0.6 if es_flaggeada else 0.25,
