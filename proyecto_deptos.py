@@ -2411,6 +2411,73 @@ print(f'{MAPA_HTML}: {len(mapa_datos)} casas de test graficadas '
       f'({(mapa_datos["flag"] != "dentro_del_intervalo").sum()} flaggeadas).')
 
 # =======================================================================================
+# PASO 5i (extra) -- MAPA CON TODO EL DATASET (train + test), a pedido explícito
+# =======================================================================================
+# El mapa de arriba usa solo test porque es el único fold con una garantía de cobertura válida.
+# Este segundo mapa aplica los mismos tres modelos de cuantil + la misma corrección conformal a
+# TODO deptos_df (5.284 filas), sin reajustar nada -- diagnóstico/exploratorio, no una métrica a
+# reportar. Dentro de las filas de train hay dos grupos con un problema distinto cada uno:
+#   - Ajuste (3.381 filas): el modelo las vio directo en su fit -- predicción in-sample, se ve
+#     "mejor calibrada" de lo real casi por definición, haya o no overfitting.
+#   - Calibración (846 filas): no las vio el fit, pero DEFINIERON la corrección conformal --
+#     aplicarles esa misma corrección es circular, no es su desempeño fuera de muestra real.
+# El tooltip marca 'train'/'test' por punto para que quede transparente cuál es cuál.
+
+MAPA_COMPLETO_HTML = os.path.join(GRAFICOS_DIR, 'mapa_intervalos_completo.html')
+
+X_codificado_completo = aplicar_codificacion(X, params_codificacion)
+X_final_completo = aplicar_escalado_numerico(X_codificado_completo, params_escalado)
+X_final_completo = aplicar_features_distancia(X_final_completo, X['comuna'], params_distancia)
+X_final_completo = aplicar_ratios(X_final_completo, X, params_ratios)
+X_final_completo = X_final_completo.drop(columns=COLUMNAS_DROP_ESTRUCTURAL)
+X_final_completo = agregar_gastos_comunes_informado(X_final_completo, X)
+X_final_completo = aplicar_densidad(X_final_completo, X, params_densidad)
+
+q05_completo = np.exp(modelo_q05.predict(X_final_completo)) - correccion_conformal
+q50_completo = np.exp(modelo_q50.predict(X_final_completo))
+q95_completo = np.exp(modelo_q95.predict(X_final_completo)) + correccion_conformal
+q05_completo, q95_completo = np.minimum(q05_completo, q95_completo), np.maximum(q05_completo, q95_completo)
+
+precio_real_completo = y.to_numpy()
+flag_completo = np.select(
+    [precio_real_completo < q05_completo, precio_real_completo > q95_completo],
+    ['subvalorada', 'sobrevalorada'],
+    default='dentro_del_intervalo',
+)
+
+mapa_datos_completo = pd.DataFrame({
+    'comuna': X['comuna'].to_numpy(), 'latitud': X['latitud'].to_numpy(), 'longitud': X['longitud'].to_numpy(),
+    'precio_real': precio_real_completo, 'q05': q05_completo, 'q50': q50_completo, 'q95': q95_completo,
+    'flag': flag_completo,
+}, index=X.index)
+mapa_datos_completo['fold'] = np.where(mapa_datos_completo.index.isin(indice_train), 'train', 'test')
+mapa_datos_completo = mapa_datos_completo.join(deptos_df.loc[mapa_datos_completo.index, ['url']])
+
+mapa_completo = folium.Map(location=[mapa_datos_completo['latitud'].mean(), mapa_datos_completo['longitud'].mean()],
+                            zoom_start=12, tiles='OpenStreetMap')
+
+for _, fila in mapa_datos_completo.iterrows():
+    es_gris = fila['flag'] == 'dentro_del_intervalo'
+    tooltip = (f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
+               f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
+               f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
+               f"Intervalo 90%: [{fila['q05']:,.0f}, {fila['q95']:,.0f}] CLP<br>"
+               f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
+    folium.CircleMarker(
+        location=[fila['latitud'], fila['longitud']],
+        radius=3 if es_gris else 6,
+        color=COLOR_POR_FLAG[fila['flag']],
+        fill=True, fill_opacity=0.25 if es_gris else 0.85,
+        opacity=0.25 if es_gris else 0.85,
+        tooltip=tooltip,
+    ).add_to(mapa_completo)
+
+mapa_completo.save(MAPA_COMPLETO_HTML)
+print(f'{MAPA_COMPLETO_HTML}: {len(mapa_datos_completo)} casas graficadas (train+test) '
+      f'({(mapa_datos_completo["flag"] != "dentro_del_intervalo").sum()} flaggeadas) -- '
+      f'diagnóstico, no tiene garantía de cobertura para las filas de train.')
+
+# =======================================================================================
 # PASO 5j -- LÍMITES: QUÉ NO PUEDE RESPONDER ESTE MODELO
 # =======================================================================================
 # No son bugs ni pendientes, son techos del enfoque. Van escritos acá para que el ranking no se
