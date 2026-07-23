@@ -2456,6 +2456,13 @@ mapa_datos_completo = mapa_datos_completo.join(deptos_df.loc[mapa_datos_completo
 mapa_completo = folium.Map(location=[mapa_datos_completo['latitud'].mean(), mapa_datos_completo['longitud'].mean()],
                             zoom_start=12, tiles='OpenStreetMap')
 
+# Color por 'flag' únicamente (rojo sobrevalorada / verde subvalorada / gris dentro), nunca por
+# 'fold' -- train y test ya comparten el mismo criterio de color, no hay tratamiento especial para
+# ninguno de los dos. Con 5.284 puntos (5x más que el mapa de solo test) hay mucha más superposición
+# geográfica, así que se baja la opacidad de los coloreados (0.85 -> 0.55) para que dos círculos
+# superpuestos se vean más oscuros en vez de taparse -- la superposición se lee como información,
+# no se pierde.
+
 for _, fila in mapa_datos_completo.iterrows():
     es_gris = fila['flag'] == 'dentro_del_intervalo'
     tooltip = (f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
@@ -2467,8 +2474,8 @@ for _, fila in mapa_datos_completo.iterrows():
         location=[fila['latitud'], fila['longitud']],
         radius=3 if es_gris else 6,
         color=COLOR_POR_FLAG[fila['flag']],
-        fill=True, fill_opacity=0.25 if es_gris else 0.85,
-        opacity=0.25 if es_gris else 0.85,
+        fill=True, fill_opacity=0.15 if es_gris else 0.55,
+        opacity=0.15 if es_gris else 0.6,
         tooltip=tooltip,
     ).add_to(mapa_completo)
 
