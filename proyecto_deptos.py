@@ -2315,22 +2315,49 @@ ranking_filtrado = aplicar_filtros_comprador(intervalos_test, X_test, filtros_co
 print(f'Ranking sin filtros: {len(intervalos_test)} filas. Con filtros del comprador: {len(ranking_filtrado)} filas.')
 
 # =======================================================================================
-# PASO 5h -- EXPORT casas_candidatas.xlsx (pendiente)
+# PASO 5h -- EXPORT casas_candidatas.xlsx
 # =======================================================================================
-# Columnas mínimas: url, comuna, barrio, precio real (CLP y UF), predicho, q05, q95, ancho del
-# intervalo, residuo %, distancia al borde del intervalo, superficie total y útil, dormitorios,
-# baños, estacionamientos, antigüedad, latitud y longitud.
+# Solo TEST: las predicciones sobre train son in-sample (los tres modelos de cuantil las vieron en
+# su fit -- o en la calibración conformal) y tienen residuos artificialmente chicos. La alternativa
+# correcta -- predicciones out-of-fold para train reusando la CV de 5a -- necesitaría que
+# `ejecutar_cv_repetida` devolviera las predicciones por fila además del MdAPE agregado; queda
+# pendiente (ver PENDIENTES.md). Mezclar train sin marcarlo produciría un ranking donde esas casas
+# parecen sistemáticamente mejor tasadas de lo que están.
 #
-#   - Exportar valores CRUDOS, no las columnas de X_*_final: nadie puede leer "Superficie total =
-#     -0,42". Hay que conservar el índice para hacer join contra el dataframe previo a PASO 4.
-#   - Incluir el ancho del intervalo por fila: es lo que le dice al usuario cuánta confianza tiene
-#     cada línea del archivo.
-#   - Train vs test: las predicciones sobre train son in-sample y tienen residuos artificialmente
-#     chicos. O se exporta solo test, o se generan predicciones out-of-fold para train con la CV de
-#     5a. Mezclar ambas sin marcarlo produce un ranking donde las casas de train parecen
-#     sistemáticamente mejor tasadas de lo que están.
-#   - CLAUDE.md afirma hoy que este script produce casas_candidatas.xlsx. Es falso: el archivo no
-#     existe ni se genera. Corregir CLAUDE.md al implementar esto.
+# Valores CRUDOS, no las columnas de X_test_final: nadie puede leer "Superficie total = -0,42".
+# 'barrio' y las columnas físicas salen de X_test (ya imputado en PASO 2b, pero sin escalar ni
+# codificar); 'url' y 'precio'/'UM' no están en X_test (PASO 4a las excluyó por ser identificador o
+# fuga) y se buscan en `deptos_df` por el mismo índice. 'precio' se deja en su moneda original (UF
+# o CLP según 'UM') en vez de forzar una conversión a UF: no hay tipo de cambio UF/CLP histórico en
+# este proyecto, e inventar uno sería peor que mostrar el dato tal como se publicó.
+#
+# Solo filas FLAGGEADAS (fuera del intervalo, ver PASO 5f): el archivo se llama "casas candidatas",
+# no "todas las casas de test" -- CLAUDE.md ya lo describe como "subset flagged". Las ~92% que
+# caen dentro del intervalo ("el modelo no encontró nada raro") no son candidatas a nada y solo
+# ensuciarían el archivo. PASO 5i (mapa) sí necesita el set completo -- usa `ranking_filtrado`
+# directamente, no este export.
+
+CASAS_CANDIDATAS_XLSX = 'casas_candidatas.xlsx'
+
+columnas_export_crudas = ['barrio', 'Superficie total', 'Superficie útil', 'Dormitorios', 'Baños',
+                          'Estacionamientos', 'Antigüedad', 'latitud', 'longitud']
+
+casas_candidatas = ranking_filtrado.loc[ranking_filtrado['flag'] != 'dentro_del_intervalo']
+casas_candidatas = casas_candidatas.join(X_test[columnas_export_crudas])
+casas_candidatas = casas_candidatas.join(deptos_df.loc[casas_candidatas.index, ['url', 'precio', 'UM']])
+
+columnas_finales = [
+    'url', 'comuna', 'barrio', 'flag', 'score_ranking',
+    'precio_real', 'precio', 'UM', 'q05', 'q50', 'q95', 'ancho_pct', 'residuo_pct',
+    'Superficie total', 'Superficie útil', 'Dormitorios', 'Baños', 'Estacionamientos', 'Antigüedad',
+    'latitud', 'longitud',
+]
+casas_candidatas = casas_candidatas[columnas_finales].sort_values('score_ranking', ascending=False)
+casas_candidatas.to_excel(CASAS_CANDIDATAS_XLSX, index=False)
+
+print(f'{CASAS_CANDIDATAS_XLSX}: {len(casas_candidatas)} filas exportadas '
+      f'-- {(casas_candidatas["flag"] == "subvalorada").sum()} subvaloradas, '
+      f'{(casas_candidatas["flag"] == "sobrevalorada").sum()} sobrevaloradas.')
 
 # =======================================================================================
 # PASO 5i -- MAPA (pendiente)

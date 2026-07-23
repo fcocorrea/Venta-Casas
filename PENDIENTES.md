@@ -99,30 +99,39 @@ filas cierre antes del split**.
 
 ### 🔴 P1 — Intervalos de predicción (bloquea el objetivo de negocio)
 
-Hoy no se puede distinguir "esta casa está barata" de "el modelo no supo predecir esta casa".
+### ✅ P1 — Intervalos de predicción (resuelto 2026-07-23)
 
-Medido: con umbral fijo de ±10 % se flagearía el **43 % del inventario** (20,6 % subvaluadas +
-22,6 % sobrevaluadas). El error del modelo (±8-20 %) es del mismo orden que el margen de
-negociación típico en Chile (5-10 %) — señal ≈ ruido.
+Antes no se podía distinguir "esta casa está barata" de "el modelo no supo predecir esta casa".
+Medido: con umbral fijo de ±10 % se hubiera flagueado el 43 % del inventario -- señal ≈ ruido.
 
-**Qué hacer:** `HistGradientBoostingRegressor(loss="quantile", quantile=...)` a q=0,05 / 0,50 / 0,95,
-o conformal prediction. Flagear una casa **solo si su precio real cae fuera del intervalo**, nunca
-contra un umbral fijo.
+**Resuelto:** PASO 5e implementa CQR (conformalized quantile regression) -- tres
+`HistGradientBoostingRegressor(loss="quantile")` a q=0,05/0,50/0,95, calibrados sobre un fold de
+calibración recortado de train (20 %, nunca visto por el fit). Medido en test:
 
-### 🔴 P2 — Implementar PASO 5b en adelante (modelamiento/producción, el entregable no existe)
+- Cobertura empírica: **91,7 %** (nominal 90 %) -- bien calibrado.
+- Ancho del intervalo (mediana): **56,1 %** del precio predicho (p25: 46,7 %, p75: 71,3 %) -- ancho,
+  la herramienta solo señala casos extremos con confianza, no matices finos. Es un hallazgo, no un
+  fracaso, pero hay que comunicarlo.
+- Cobertura por decil de precio: 93-95 % en deciles baratos, **85,8 %** en los dos deciles más
+  caros -- el intervalo es menos confiable justo donde una mala calibración cuesta más plata.
 
-PASO 5 ahora tiene un bloque de diseño completo (comentarios, sin código) en `proyecto_deptos.py`
-con sub-pasos 5a-5j. **5a (protocolo de evaluación) ya está implementado** -- ver P3 abajo. Falta
-el resto:
+PASO 5f (residuo + regla de flag fuera-de-intervalo + ranking por distancia al borde) y 5g (filtros
+del comprador, placeholders configurables, aplicados sobre el ranking) también implementados.
 
-1. 5b modelo lineal log-log, 5c tuning de hiperparámetros, 5d evaluación final en test
-2. 5e intervalos de predicción -- bloquea el objetivo de negocio (ver P1)
-3. 5f residuo `(precio real − predicho) / predicho` + ranking por distancia al borde del intervalo
-4. 5g filtros del comprador (dormitorios, baños) **sobre** el ranking, no como criterio principal
-5. 5h export `casas_candidatas.xlsx`, 5i mapa coloreado rojo (sobrevalorada) → verde (subvalorada)
+### ✅ P2 — PASO 5e-5h implementados (2026-07-23); 5b-5d y 5i siguen pendientes
 
-> `CLAUDE.md` afirma que el script produce `casas_candidatas.xlsx`. **Es falso hoy** — el archivo no
-> existe ni se genera. Corregir `CLAUDE.md` al implementar esto.
+PASO 5 tiene un bloque de diseño completo (comentarios) en `proyecto_deptos.py` con sub-pasos
+5a-5j. Implementados: **5a** (CV, ver P3), **5e** (intervalos, ver P1), **5f** (residuo/flag/
+ranking), **5g** (filtros del comprador), **5h** (export `casas_candidatas.xlsx` -- solo filas
+flaggeadas de test, 88 filas medido: 31 subvaloradas + 57 sobrevaloradas). `CLAUDE.md` ya se
+corrigió para describir esto con precisión.
+
+Falta:
+
+1. 5b modelo lineal log-log, 5c tuning de hiperparámetros, 5d evaluación final en test (no bloquea
+   el objetivo de negocio -- el modelo actual con intervalos ya es accionable)
+2. 5i mapa coloreado rojo (sobrevalorada) → verde (subvalorada), gris para el resto -- usa
+   `ranking_filtrado` (el set completo de test, no el export filtrado de 5h)
 
 ### ✅ P3 — Validación cruzada (protocolo resuelto 2026-07-23; feature selection con CV sigue pendiente)
 
@@ -242,10 +251,11 @@ al colegio *más cercano* de una lista, en vez de a un centroide inventado).
 
 ## 7. Arranque sugerido para la próxima sesión
 
-1. Commitear el trabajo actual (está todo sin commitear, ver sección 1).
-2. **P1 + P2 (5e-5h) juntos** — son el objetivo de negocio y se complementan: los intervalos de
-   predicción son justamente lo que hace que el ranking de PASO 5f sea accionable en vez de ruido.
-   La CV de P3 (5a) ya está lista para usarse como protocolo de evaluación de cualquier modelo con
-   intervalos que se pruebe.
-3. La parte de P3 que sigue abierta (selección de features con CV, no solo el protocolo de
-   medición) puede esperar a después de P1+P2 -- no bloquea el objetivo de negocio.
+P1, P2 (5e-5h) y P3 (protocolo de CV) ya están resueltos -- el entregable de negocio (ranking con
+intervalos + export) existe y corre de punta a punta. Lo que sigue, sin bloquear nada:
+
+1. **5i (mapa)** -- siguiente pieza natural de PASO 5, usa `ranking_filtrado` (ya calculado).
+2. **5b-5d** (lineal log-log, tuning, evaluación final) -- mejoran el número y dan un chequeo de
+   sanidad de coeficientes, pero el sistema ya es accionable sin ellos.
+3. La parte de P3 que sigue abierta (selección de features CON la CV, no solo el protocolo de
+   medición) -- reemplazar la decisión de un solo split de PASO 4k.

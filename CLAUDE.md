@@ -51,7 +51,11 @@ schtasks /create /tn "DeptosCrawlDiario" /tr '"<path>\run_daily_crawl.bat"' /sc 
 
 **Volume**: at the time of writing, the 3 casa branches totaled ~8,900 listings combined, and a full uncapped crawl runs ~9+ hours at the current `DOWNLOAD_DELAY`. This is why the schedule is a 22:00 overnight run rather than anything more frequent.
 
-**`proyecto_deptos.py`** is a Jupyter-notebook-style script (exported cell-by-cell, not written as a reusable pipeline) that does EDA, outlier detection, and missing-value imputation on the scrape output, aimed at a price regression model. It reads only `deptos.json` end-to-end (no intermediate checkpoint file) and runs clean on a fresh crawl. `comuna`/`barrio` nulls are imputed with a nearest-neighbor lookup on `latitud`/`longitud` (`scipy.spatial.cKDTree`), not fuzzy text matching. It writes `deptos_limpios.xlsx` (full cleaned dataset) and `casas_candidatas.xlsx` (subset flagged as under-market), plus the charts under `gráficos/` — all committed to the repo and overwritten on each run.
+**`proyecto_deptos.py`** is a Jupyter-notebook-style script (exported cell-by-cell, not written as a reusable pipeline) that does EDA, outlier detection, missing-value imputation, feature engineering, and price prediction with uncertainty intervals on the scrape output. It reads only `deptos.json` end-to-end (no intermediate checkpoint file) and runs clean on a fresh crawl. `comuna`/`barrio` nulls are imputed with a nearest-neighbor lookup on `latitud`/`longitud` (`scipy.spatial.cKDTree`), not fuzzy text matching. All of PASO 2b-4j (everything that fits a parameter from the data — imputation, encoders, scalers, distance/density features) is written as `ajustar_*()`/`aplicar_*()` pairs so it can be refit per fold; PASO 5a's repeated cross-validation (`ejecutar_cv_repetida`) calls these directly instead of reusing the single 80/20 split's fitted parameters.
+
+Price intervals (PASO 5e) come from conformalized quantile regression (three `HistGradientBoostingRegressor(loss='quantile')` models at q=0.05/0.50/0.95, calibrated on a held-out slice of train) rather than a fixed ±% threshold — a fixed threshold was measured to flag 43% of the inventory, indistinguishable from noise. A listing is flagged only if its real price falls outside its own predicted interval (PASO 5f), ranked by distance to the interval edge, not by raw residual.
+
+It writes `deptos_limpios.xlsx` (full cleaned dataset), `casas_candidatas.xlsx` (test-set listings flagged as outside their predicted interval — under- **or** over-market, ranked by distance to the edge; listings that fall inside their interval are excluded, and train-set listings are excluded because their predictions are in-sample), plus the charts under `gráficos/` — all committed to the repo and overwritten on each run.
 
 ## Data flow
 
@@ -59,7 +63,8 @@ schtasks /create /tn "DeptosCrawlDiario" /tr '"<path>\run_daily_crawl.bat"' /sc 
 scrapy crawl deptos -O deptos.json   (gitignored, one run's worth of raw listings)
         |
         v
-proyecto_deptos.py   (EDA -> cleaning -> lat/lon imputation -> regression prep)
+proyecto_deptos.py   (EDA -> cleaning -> lat/lon imputation -> feature engineering -> CV ->
+                       quantile regression intervals -> flag/rank flagged listings)
         |
         v
 deptos_limpios.xlsx, casas_candidatas.xlsx, gráficos/*.png   (committed, overwritten each run)
