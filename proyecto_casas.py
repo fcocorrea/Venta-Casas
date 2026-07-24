@@ -3040,6 +3040,13 @@ css_toolbar = """
 .vd-group:hover .vd-panel, .vd-group.vd-abierto .vd-panel, .vd-group:focus-within .vd-panel {
   opacity: 1; visibility: visible; transform: translateY(0);
 }
+.vd-valor-exacto { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.vd-valor-exacto input[type="number"] {
+  width: 76px; border: 1px solid #E5E7EB; border-radius: 6px; padding: 4px 6px;
+  font-size: 12.5px; font-family: inherit; color: #111827;
+}
+.vd-valor-exacto input[type="number"]:focus { outline: 2px solid #0F766E; outline-offset: 1px; border-color: #0F766E; }
+.vd-valor-exacto span { color: #9CA3AF; font-size: 12px; }
 .vd-slider { position: relative; height: 28px; margin: 10px 2px 2px; }
 .vd-slider__track {
   position: absolute; top: 50%; left: 0; right: 0; height: 4px;
@@ -3134,14 +3141,25 @@ checkboxes_comuna_html = ''.join(
 )
 
 
-def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, paso: int = 1) -> str:
+def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, paso: int = 1,
+                   permitir_valor_exacto: bool = False) -> str:
+    # `permitir_valor_exacto` agrega dos <input type="number"> arriba del slider -- alternativa
+    # para escribir el monto exacto en vez de arrastrar. Por ahora solo Precio lo pide.
+    campos_exactos = ''
+    if permitir_valor_exacto:
+        campos_exactos = f"""
+      <div class="vd-valor-exacto">
+        <input type="number" id="exacto-{prefijo}-min" aria-label="Valor mínimo exacto" placeholder="Desde">
+        <span>–</span>
+        <input type="number" id="exacto-{prefijo}-max" aria-label="Valor máximo exacto" placeholder="Hasta">
+      </div>"""
     return f"""
   <div class="vd-group" data-grupo="{prefijo}">
     <button type="button" class="vd-group__button">
       <span class="vd-group__label" id="etiqueta-{prefijo}">{etiqueta}</span>
       <span class="vd-group__value" id="resumen-{prefijo}">Todos</span>
     </button>
-    <div class="vd-panel">
+    <div class="vd-panel">{campos_exactos}
       <div class="vd-slider">
         <div class="vd-slider__track"></div>
         <div class="vd-slider__fill" id="relleno-{prefijo}"></div>
@@ -3161,7 +3179,7 @@ html_toolbar = f"""
 <div id="toolbar-filtros">
   <span class="vd-brand">Casas — filtros</span>
   <button type="button" class="vd-moneda-toggle" id="toggle-moneda" title="Cambiar precios entre CLP y UF">UF</button>
-  {bloque_slider('precio', 'Precio (M CLP)', precio_min_millones, precio_max_millones)}
+  {bloque_slider('precio', 'Precio (M CLP)', precio_min_millones, precio_max_millones, permitir_valor_exacto=True)}
   {bloque_slider('dormitorios', 'Dormitorios', 0, dorm_max_dato)}
   {bloque_slider('banos', 'Baños', 0, banos_max_dato)}
   {bloque_slider('superficie', 'Superficie (m²)', 0, superficie_max_dato, paso=5)}
@@ -3451,11 +3469,56 @@ var sliderDormitorios = configurarSliderDual('dormitorios', function(v) {{ retur
 var sliderBanos = configurarSliderDual('banos', function(v) {{ return v.toFixed(0); }});
 var sliderSuperficie = configurarSliderDual('superficie', function(v) {{ return v.toFixed(0) + 'm²'; }});
 
+// Campos "Desde"/"Hasta" del panel de Precio -- alternativa a arrastrar el slider, a pedido
+// explícito. El slider sigue siendo la fuente de verdad (siempre en millones de CLP); estos
+// campos solo traducen hacia/desde la moneda que se está mostrando (monedaActual).
+var elPrecioMin = document.getElementById('rango-precio-min');
+var elPrecioMax = document.getElementById('rango-precio-max');
+var exactoPrecioMin = document.getElementById('exacto-precio-min');
+var exactoPrecioMax = document.getElementById('exacto-precio-max');
+
+function millonesClpAMonedaActual(millones) {{
+    return monedaActual === 'UF' ? (millones * 1e6 / VALOR_UF_REFERENCIA) : millones;
+}}
+function monedaActualAMillonesClp(valor) {{
+    return monedaActual === 'UF' ? (valor * VALOR_UF_REFERENCIA / 1e6) : valor;
+}}
+
+function refrescarCamposExactos() {{
+    var decimales = monedaActual === 'UF' ? 2 : 0;
+    exactoPrecioMin.value = millonesClpAMonedaActual(parseFloat(elPrecioMin.value)).toFixed(decimales);
+    exactoPrecioMax.value = millonesClpAMonedaActual(parseFloat(elPrecioMax.value)).toFixed(decimales);
+}}
+
+function aplicarValorExactoPrecio(esMin) {{
+    var campo = esMin ? exactoPrecioMin : exactoPrecioMax;
+    var valor = parseFloat(campo.value);
+    if (isNaN(valor)) {{ refrescarCamposExactos(); return; }}
+    var millones = monedaActualAMillonesClp(valor);
+    if (esMin) {{
+        millones = Math.max(parseFloat(elPrecioMin.min), Math.min(millones, parseFloat(elPrecioMax.value)));
+        elPrecioMin.value = millones;
+    }} else {{
+        millones = Math.min(parseFloat(elPrecioMax.max), Math.max(millones, parseFloat(elPrecioMin.value)));
+        elPrecioMax.value = millones;
+    }}
+    sliderPrecio.refrescar();
+    refrescarCamposExactos();
+}}
+
+exactoPrecioMin.addEventListener('change', function() {{ aplicarValorExactoPrecio(true); }});
+exactoPrecioMax.addEventListener('change', function() {{ aplicarValorExactoPrecio(false); }});
+// Arrastrar el slider también debe reflejarse en los campos de texto, no solo al revés.
+elPrecioMin.addEventListener('input', refrescarCamposExactos);
+elPrecioMax.addEventListener('input', refrescarCamposExactos);
+refrescarCamposExactos();
+
 document.getElementById('toggle-moneda').addEventListener('click', function() {{
     monedaActual = (monedaActual === 'CLP') ? 'UF' : 'CLP';
     this.innerText = (monedaActual === 'CLP') ? 'UF' : 'CLP';
     document.getElementById('etiqueta-precio').innerText = (monedaActual === 'UF') ? 'Precio (UF)' : 'Precio (M CLP)';
     sliderPrecio.refrescar();
+    refrescarCamposExactos();
     marcadoresMapa.forEach(function(m) {{
         m.unbindPopup();
         m.bindPopup(monedaActual === 'CLP' ? m._datos.popupClp : m._datos.popupUf);
@@ -3494,6 +3557,7 @@ document.addEventListener('click', function(e) {{
 
 document.getElementById('filtro-reset').addEventListener('click', function() {{
     sliderPrecio.reset(); sliderDormitorios.reset(); sliderBanos.reset(); sliderSuperficie.reset();
+    refrescarCamposExactos();
     document.querySelectorAll('.vd-comuna').forEach(function(el) {{ el.checked = true; }});
     actualizarResumenComuna();
 }});
