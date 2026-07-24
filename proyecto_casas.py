@@ -2850,25 +2850,81 @@ mapa_completo = folium.Map(location=[mapa_datos_completo['latitud'].mean(), mapa
 # recalcular nada del modelo -- es un filtro de VISUALIZACIÓN sobre datos ya predichos.
 
 import json
+import requests
+
+# =======================================================================================
+# Tasa CLP/UF por fila -- necesaria para el toggle CLP/UF del toolbar (a pedido explícito)
+# =======================================================================================
+# Los precios en `mapa_datos_completo` ya están unificados en CLP ('clp', ver limpieza inicial),
+# pero para las publicaciones que se transaron en UF (UM == 'UF') 'clp' es justo el equivalente en
+# pesos que EL SITIO calculó al momento del scrape con el valor UF de ESE día -- clp / precio
+# recupera esa tasa exacta, más precisa que aplicarle a un aviso publicado semanas atrás el valor
+# UF de hoy. Solo las publicaciones transadas directo en CLP (UM == 'CLP', sin equivalente UF
+# informado por el sitio) no traen ninguna tasa propia -- para esas, y solo para esas, se recurre a
+# la API de mindicador.cl.
+tasa_uf_por_fila = pd.Series(np.nan, index=deptos_df.index, dtype=float)
+es_uf = deptos_df['UM'] == 'UF'
+tasa_uf_por_fila.loc[es_uf] = deptos_df.loc[es_uf, 'clp'] / deptos_df.loc[es_uf, 'precio']
+
+# Banda de sanidad: la UF chilena no se ha movido fuera de este rango en años -- una fila fuera de
+# banda es un error de parseo (medido: 2 de 5.547 filas UF, ver PENDIENTES.md), no una tasa real, y
+# cae al mismo respaldo de API que las filas CLP en vez de mostrar un UF inventado.
+BANDA_UF_MIN, BANDA_UF_MAX = 20000, 60000
+fuera_de_banda = (tasa_uf_por_fila < BANDA_UF_MIN) | (tasa_uf_por_fila > BANDA_UF_MAX)
+tasa_uf_por_fila[fuera_de_banda] = np.nan
+
+filas_sin_tasa_propia = int(tasa_uf_por_fila.isna().sum())
+try:
+    VALOR_UF_API = float(requests.get('https://mindicador.cl/api/uf', timeout=5).json()['serie'][0]['valor'])
+    print(f'Valor UF (mindicador.cl), usado en {filas_sin_tasa_propia} filas sin tasa propia: '
+          f'{VALOR_UF_API:,.2f} CLP')
+except Exception as error:
+    VALOR_UF_API = 39000.0  # respaldo aproximado si mindicador.cl no responde -- actualizar a mano si se usa
+    print(f'ADVERTENCIA: no se pudo obtener el valor UF de mindicador.cl ({error}). '
+          f'Usando respaldo aproximado para esas {filas_sin_tasa_propia} filas: {VALOR_UF_API:,.2f} CLP.')
+
+tasa_uf_por_fila = tasa_uf_por_fila.fillna(VALOR_UF_API)
+mapa_datos_completo = mapa_datos_completo.join(tasa_uf_por_fila.rename('tasa_uf'))
+
+# Solo para el texto del slider de precio (control agregado, no ligado a una fila): mediana de las
+# tasas efectivamente usadas, dominada por la tasa propia de las publicaciones en UF (la mayoría).
+VALOR_UF_REFERENCIA = float(mapa_datos_completo['tasa_uf'].median())
+
+
+def construir_popup(fila: pd.Series, moneda: str) -> str:
+    """Arma el popup de un punto en la moneda pedida ('CLP' o 'UF'). La conversión usa la tasa
+    PROPIA de esa fila (fila['tasa_uf']) -- no un valor UF global -- para que una publicación
+    hecha en UF convierta con la tasa que el sitio le aplicó a ella. Solo precio_real/q50/q05/q95
+    cambian con la moneda -- residuo_pct (ya es %) y los atributos físicos no."""
+    if moneda == 'UF':
+        tasa = fila['tasa_uf']
+        precio_real, q50, q05, q95 = (fila['precio_real'] / tasa, fila['q50'] / tasa,
+                                       fila['q05'] / tasa, fila['q95'] / tasa)
+        formato = '{:,.2f}'
+    else:
+        precio_real, q50, q05, q95 = fila['precio_real'], fila['q50'], fila['q05'], fila['q95']
+        formato = '{:,.0f}'
+    return (f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
+            f"Precio real: {formato.format(precio_real)} {moneda}<br>"
+            f"Predicho (q50): {formato.format(q50)} {moneda}<br>"
+            f"Intervalo 90%: [{formato.format(q05)}, {formato.format(q95)}] {moneda}<br>"
+            f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
+            f"Dormitorios: {fila['Dormitorios']:.0f} | Baños: {fila['Baños']:.0f} | "
+            f"Superficie total: {fila['Superficie total']:.0f} m²<br>"
+            f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
+
 
 datos_mapa_js = []
 for idx, fila in mapa_datos_completo.iterrows():
     es_flaggeada = fila['flag'] != 'dentro_del_intervalo'
-    popup_html = (f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
-                  f"Precio real: {fila['precio_real']:,.0f} CLP<br>"
-                  f"Predicho (q50): {fila['q50']:,.0f} CLP<br>"
-                  f"Intervalo 90%: [{fila['q05']:,.0f}, {fila['q95']:,.0f}] CLP<br>"
-                  f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
-                  f"Dormitorios: {fila['Dormitorios']:.0f} | Baños: {fila['Baños']:.0f} | "
-                  f"Superficie total: {fila['Superficie total']:.0f} m²<br>"
-                  f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
     datos_mapa_js.append({
         'lat': fila['latitud'], 'lon': fila['longitud'],
         'color': color_por_residuo(fila['precio_real'], fila['q50']),
         'radio': radio_por_magnitud(fila['residuo_pct']),
         'fillOpacity': 0.55 if es_flaggeada else 0.2,
         'opacity': 0.6 if es_flaggeada else 0.25,
-        'popup': popup_html,
+        'popupClp': construir_popup(fila, 'CLP'),
+        'popupUf': construir_popup(fila, 'UF'),
         'comuna': fila['comuna'],
         'precio': float(fila['precio_real']),
         'dormitorios': float(fila['Dormitorios']),
@@ -2909,6 +2965,14 @@ css_toolbar = """
   font-weight: 600; font-size: 13px; color: #0F766E;
   margin-right: 12px; white-space: nowrap; letter-spacing: 0.01em;
 }
+.vd-moneda-toggle {
+  background: #0F766E; color: #ffffff; border: 1px solid #0F766E; border-radius: 6px;
+  padding: 6px 14px; margin-right: 10px; font-size: 12px; font-weight: 700;
+  font-family: inherit; letter-spacing: 0.02em; cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.vd-moneda-toggle:hover { background: #0d5f58; }
+.vd-moneda-toggle:active { transform: scale(0.96); }
 .vd-group { position: relative; }
 .vd-group__button {
   display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
@@ -2990,7 +3054,7 @@ def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, p
     return f"""
   <div class="vd-group" data-grupo="{prefijo}">
     <button type="button" class="vd-group__button">
-      <span class="vd-group__label">{etiqueta}</span>
+      <span class="vd-group__label" id="etiqueta-{prefijo}">{etiqueta}</span>
       <span class="vd-group__value" id="resumen-{prefijo}">Todos</span>
     </button>
     <div class="vd-panel">
@@ -3012,6 +3076,7 @@ def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, p
 html_toolbar = f"""
 <div id="toolbar-filtros">
   <span class="vd-brand">Casas — filtros</span>
+  <button type="button" class="vd-moneda-toggle" id="toggle-moneda" title="Cambiar precios entre CLP y UF">UF</button>
   {bloque_slider('precio', 'Precio (M CLP)', precio_min_millones, precio_max_millones)}
   {bloque_slider('dormitorios', 'Dormitorios', 0, dorm_max_dato)}
   {bloque_slider('banos', 'Baños', 0, banos_max_dato)}
@@ -3039,12 +3104,16 @@ window.addEventListener('load', function() {{
 // garantiza que la asignación real ya corrió, sea cual sea el orden interno de folium/branca.
 var datosCasasMapa = {json.dumps(datos_mapa_js)};
 var marcadoresMapa = [];
+var monedaActual = 'CLP';
+// Solo para el texto del slider de precio (control agregado) -- los popups convierten cada uno
+// con su propia tasa (ver `tasa_uf` en Python), no con este valor de referencia.
+var VALOR_UF_REFERENCIA = {VALOR_UF_REFERENCIA};
 
 datosCasasMapa.forEach(function(d) {{
     var m = L.circleMarker([d.lat, d.lon], {{
         radius: d.radio, color: d.color, fill: true,
         fillOpacity: d.fillOpacity, opacity: d.opacity, weight: 2,
-    }}).bindPopup(d.popup);
+    }}).bindPopup(d.popupClp);
     m._datos = d;
     m.addTo({nombre_js_mapa});
     marcadoresMapa.push(m);
@@ -3112,13 +3181,35 @@ function configurarSliderDual(prefijo, formatearValor) {{
     }});
 
     actualizar();
-    return {{ reset: function() {{ elMin.value = limiteMin; elMax.value = limiteMax; actualizar(); }} }};
+    return {{
+        reset: function() {{ elMin.value = limiteMin; elMax.value = limiteMax; actualizar(); }},
+        refrescar: actualizar,
+    }};
 }}
 
-var sliderPrecio = configurarSliderDual('precio', function(v) {{ return v.toFixed(0) + 'M'; }});
+// El slider de precio sigue operando internamente en millones de CLP (mismo grid que
+// `aplicarFiltrosMapaCompleto` espera) -- el toggle de moneda solo cambia cómo se MUESTRA ese
+// mismo valor, no reescala el rango del slider.
+var sliderPrecio = configurarSliderDual('precio', function(v) {{
+    if (monedaActual === 'UF') {{
+        return Math.round(v * 1e6 / VALOR_UF_REFERENCIA).toLocaleString('en-US') + ' UF';
+    }}
+    return v.toFixed(0) + 'M';
+}});
 var sliderDormitorios = configurarSliderDual('dormitorios', function(v) {{ return v.toFixed(0); }});
 var sliderBanos = configurarSliderDual('banos', function(v) {{ return v.toFixed(0); }});
 var sliderSuperficie = configurarSliderDual('superficie', function(v) {{ return v.toFixed(0) + 'm²'; }});
+
+document.getElementById('toggle-moneda').addEventListener('click', function() {{
+    monedaActual = (monedaActual === 'CLP') ? 'UF' : 'CLP';
+    this.innerText = (monedaActual === 'CLP') ? 'UF' : 'CLP';
+    document.getElementById('etiqueta-precio').innerText = (monedaActual === 'UF') ? 'Precio (UF)' : 'Precio (M CLP)';
+    sliderPrecio.refrescar();
+    marcadoresMapa.forEach(function(m) {{
+        m.unbindPopup();
+        m.bindPopup(monedaActual === 'CLP' ? m._datos.popupClp : m._datos.popupUf);
+    }});
+}});
 
 function actualizarResumenComuna() {{
     var todas = document.querySelectorAll('.vd-comuna');
