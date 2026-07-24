@@ -70,6 +70,24 @@ print('Cantidad de observaciones: {}.\nCantidad de atributos: {}.'.format(*depto
 print('Columnas:', ', '.join(deptos_df.columns.tolist()))
 
 # =======================================================================================
+# PASO 1b -- EXCLUSIONES MANUALES
+# =======================================================================================
+# El scraper filtra por categoría/comuna en la URL de búsqueda (ver casas_scraper/spiders/casas.py),
+# pero Portal Inmobiliario a veces indexa bajo esa misma categoría terrenos, propiedades comerciales
+# o casas fuera de las tres comunas cuya descripción así lo sugiere -- eso solo se detecta leyendo
+# la publicación, no filtrando columnas. El mapa interactivo (gráficos/mapa_intervalos_completo.html)
+# tiene un botón "Eliminar esta casa" por publicación que exporta la URL a este archivo (una URL por
+# línea; líneas vacías o que empiezan con # se ignoran). Si el archivo no existe, no se excluye nada.
+EXCLUSIONES_MANUALES_TXT = 'exclusiones_manuales.txt'
+if os.path.exists(EXCLUSIONES_MANUALES_TXT):
+    with open(EXCLUSIONES_MANUALES_TXT, encoding='utf-8') as f:
+        urls_excluidas = {linea.strip() for linea in f if linea.strip() and not linea.strip().startswith('#')}
+    filas_antes = len(deptos_df)
+    deptos_df = deptos_df[~deptos_df['url'].isin(urls_excluidas)]
+    print(f'{EXCLUSIONES_MANUALES_TXT}: {filas_antes - len(deptos_df)} filas excluidas manualmente '
+          f'de {len(urls_excluidas)} URLs listadas.')
+
+# =======================================================================================
 # PASO 2 -- LIMPIEZA DE DATOS
 # =======================================================================================
 # Homologa y transforma los datos, que no vienen expresados de forma consistente entre
@@ -2891,11 +2909,20 @@ mapa_datos_completo = mapa_datos_completo.join(tasa_uf_por_fila.rename('tasa_uf'
 VALOR_UF_REFERENCIA = float(mapa_datos_completo['tasa_uf'].median())
 
 
-def construir_popup(fila: pd.Series, moneda: str) -> str:
+def construir_popup(fila: pd.Series, moneda: str, posicion: int) -> str:
     """Arma el popup de un punto en la moneda pedida ('CLP' o 'UF'). La conversión usa la tasa
     PROPIA de esa fila (fila['tasa_uf']) -- no un valor UF global -- para que una publicación
     hecha en UF convierta con la tasa que el sitio le aplicó a ella. Solo precio_real/q50/q05/q95
-    cambian con la moneda -- residuo_pct (ya es %) y los atributos físicos no."""
+    cambian con la moneda -- residuo_pct (ya es %) y los atributos físicos no.
+
+    El ícono 🗑 (esquina inferior derecha) no elimina al primer click -- solo destapa la franja
+    `.vd-popup-confirm` (ver css_toolbar), que pide confirmación explícita ("Sí, eliminar" /
+    "Cancelar") antes de tocar el marcador. Se evita `window.confirm()` nativo a propósito: bloquea
+    el hilo del navegador y no se puede estilizar, así que la confirmación se resuelve inline con
+    CSS (misma idea que los paneles de filtro). `data-idx={posicion}` es la posición de esta fila
+    en `datos_mapa_js`/`marcadoresMapa` (mismo orden, ver el loop que llama a esta función) -- el
+    listener delegado en JS (ver script_filtros) la usa para ubicar el marcador sin buscarlo por
+    URL en cada click."""
     if moneda == 'UF':
         tasa = fila['tasa_uf']
         precio_real, q50, q05, q95 = (fila['precio_real'] / tasa, fila['q50'] / tasa,
@@ -2904,18 +2931,26 @@ def construir_popup(fila: pd.Series, moneda: str) -> str:
     else:
         precio_real, q50, q05, q95 = fila['precio_real'], fila['q50'], fila['q05'], fila['q95']
         formato = '{:,.0f}'
-    return (f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
+    return (f"<div class='vd-popup-wrap' data-idx='{posicion}'>"
+            f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
             f"Precio real: {formato.format(precio_real)} {moneda}<br>"
             f"Predicho (q50): {formato.format(q50)} {moneda}<br>"
             f"Intervalo 90%: [{formato.format(q05)}, {formato.format(q95)}] {moneda}<br>"
             f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
             f"Dormitorios: {fila['Dormitorios']:.0f} | Baños: {fila['Baños']:.0f} | "
             f"Superficie total: {fila['Superficie total']:.0f} m²<br>"
-            f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>")
+            f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>"
+            f"<button type='button' class='vd-popup-trash' title='Eliminar esta casa del dataset'>🗑</button>"
+            f"<div class='vd-popup-confirm'>"
+            f"<span>¿Eliminar esta casa?</span>"
+            f"<button type='button' class='vd-confirm-si'>Sí, eliminar</button>"
+            f"<button type='button' class='vd-confirm-no'>Cancelar</button>"
+            f"</div>"
+            f"</div>")
 
 
 datos_mapa_js = []
-for idx, fila in mapa_datos_completo.iterrows():
+for posicion, (idx, fila) in enumerate(mapa_datos_completo.iterrows()):
     es_flaggeada = fila['flag'] != 'dentro_del_intervalo'
     datos_mapa_js.append({
         'lat': fila['latitud'], 'lon': fila['longitud'],
@@ -2923,9 +2958,10 @@ for idx, fila in mapa_datos_completo.iterrows():
         'radio': radio_por_magnitud(fila['residuo_pct']),
         'fillOpacity': 0.55 if es_flaggeada else 0.2,
         'opacity': 0.6 if es_flaggeada else 0.25,
-        'popupClp': construir_popup(fila, 'CLP'),
-        'popupUf': construir_popup(fila, 'UF'),
+        'popupClp': construir_popup(fila, 'CLP', posicion),
+        'popupUf': construir_popup(fila, 'UF', posicion),
         'comuna': fila['comuna'],
+        'url': fila['url'],
         'precio': float(fila['precio_real']),
         'dormitorios': float(fila['Dormitorios']),
         'banos': float(fila['Baños']),
@@ -3037,6 +3073,31 @@ css_toolbar = """
 }
 .vd-reset:hover { border-color: #0F766E; color: #0F766E; }
 .vd-counter { font-size: 12px; color: #6B7280; white-space: nowrap; margin-left: 12px; }
+.vd-popup-wrap { position: relative; padding-bottom: 32px; }
+.vd-popup-trash {
+  position: absolute; bottom: 0; right: 0; width: 26px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  background: #FEF2F2; border: 1px solid #FECACA; border-radius: 50%;
+  font-size: 13px; line-height: 1; cursor: pointer; padding: 0;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.vd-popup-trash:hover { background: #FEE2E2; transform: scale(1.08); }
+.vd-popup-confirm {
+  display: none; position: absolute; bottom: 0; left: 0; right: 0;
+  align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px;
+  background: #FFFBEB; border: 1px solid #FDE68A; border-radius: 6px;
+  padding: 5px 8px; font-size: 11.5px; color: #92400E;
+}
+.vd-popup-wrap.vd-confirmando .vd-popup-trash { display: none; }
+.vd-popup-wrap.vd-confirmando .vd-popup-confirm { display: flex; }
+.vd-confirm-si, .vd-confirm-no {
+  border: none; border-radius: 4px; padding: 3px 8px; font-size: 11px;
+  cursor: pointer; font-family: inherit;
+}
+.vd-confirm-si { background: #B91C1C; color: #ffffff; }
+.vd-confirm-si:hover { background: #991B1B; }
+.vd-confirm-no { background: #E5E7EB; color: #374151; }
+.vd-confirm-no:hover { background: #D1D5DB; }
 @media (max-width: 760px) {
   #toolbar-filtros { padding: 8px 10px; }
   .vd-counter { margin-left: 0; width: 100%; order: 99; }
@@ -3091,6 +3152,10 @@ html_toolbar = f"""
     </div>
   </div>
   <button type="button" class="vd-reset" id="filtro-reset">Restablecer</button>
+  <button type="button" class="vd-reset" id="descargar-eliminadas"
+          title="Descarga las URLs marcadas con 'Eliminar esta casa' como exclusiones_manuales.txt -- guárdalo en la raíz del proyecto para que el próximo análisis las excluya">
+    🗑 Exportar eliminadas (<span id="contador-eliminadas">0</span>)
+  </button>
   <span class="vd-counter" id="filtro-contador"></span>
 </div>
 """
@@ -3131,7 +3196,15 @@ function aplicarFiltrosMapaCompleto() {{
     var comunasSeleccionadas = Array.from(document.querySelectorAll('.vd-comuna:checked')).map(function(el) {{ return el.value; }});
 
     var visibles = 0;
+    var totalActivas = 0;
     marcadoresMapa.forEach(function(m) {{
+        // Eliminadas (ver eliminarCasa): nunca vuelven a mostrarse, ni siquiera si calzan con el
+        // filtro -- a diferencia del filtro de visualización, esto no se deshace con "Restablecer".
+        if (m._eliminada) {{
+            if ({nombre_js_mapa}.hasLayer(m)) {{ {nombre_js_mapa}.removeLayer(m); }}
+            return;
+        }}
+        totalActivas++;
         var d = m._datos;
         var visible = d.precio >= precioMin && d.precio <= precioMax &&
                       d.dormitorios >= dormMin && d.dormitorios <= dormMax &&
@@ -3145,8 +3218,50 @@ function aplicarFiltrosMapaCompleto() {{
             if ({nombre_js_mapa}.hasLayer(m)) {{ {nombre_js_mapa}.removeLayer(m); }}
         }}
     }});
-    document.getElementById('filtro-contador').innerText = visibles + ' de ' + marcadoresMapa.length + ' casas';
+    document.getElementById('filtro-contador').innerText = visibles + ' de ' + totalActivas + ' casas';
 }}
+
+// Casas marcadas con el botón "Eliminar esta casa" del popup (ver construir_popup en Python) --
+// se ocultan de inmediato y quedan fuera de aplicarFiltrosMapaCompleto para siempre (dentro de
+// esta sesión del navegador). "Exportar eliminadas" descarga sus URLs para que el usuario las
+// pegue en exclusiones_manuales.txt y el próximo `proyecto_casas.py` las excluya del dataset real
+// -- este botón no toca casas.json ni ningún archivo, solo la vista de este mapa.
+var urlsEliminadas = [];
+
+function eliminarCasa(posicion) {{
+    var m = marcadoresMapa[posicion];
+    if (!m || m._eliminada) {{ return; }}
+    m._eliminada = true;
+    m.closePopup();
+    if ({nombre_js_mapa}.hasLayer(m)) {{ {nombre_js_mapa}.removeLayer(m); }}
+    urlsEliminadas.push(m._datos.url);
+    document.getElementById('contador-eliminadas').innerText = urlsEliminadas.length;
+    aplicarFiltrosMapaCompleto();
+}}
+
+// El ícono 🗑 no elimina directo -- primero destapa `.vd-popup-confirm` (ver construir_popup en
+// Python) y recién al clickear "Sí, eliminar" ahí se llama a eliminarCasa. "Cancelar" (o abrir otro
+// popup, que descarta el HTML viejo) vuelve a tapar la franja de confirmación.
+document.addEventListener('click', function(e) {{
+    var trash = e.target.closest('.vd-popup-trash');
+    if (trash) {{ trash.closest('.vd-popup-wrap').classList.add('vd-confirmando'); return; }}
+
+    var cancelar = e.target.closest('.vd-confirm-no');
+    if (cancelar) {{ cancelar.closest('.vd-popup-wrap').classList.remove('vd-confirmando'); return; }}
+
+    var confirmar = e.target.closest('.vd-confirm-si');
+    if (confirmar) {{ eliminarCasa(parseInt(confirmar.closest('.vd-popup-wrap').dataset.idx, 10)); return; }}
+}});
+
+document.getElementById('descargar-eliminadas').addEventListener('click', function() {{
+    if (urlsEliminadas.length === 0) {{ return; }}
+    var blob = new Blob([urlsEliminadas.join('\\n') + '\\n'], {{ type: 'text/plain' }});
+    var enlace = document.createElement('a');
+    enlace.href = URL.createObjectURL(blob);
+    enlace.download = 'exclusiones_manuales.txt';
+    enlace.click();
+    URL.revokeObjectURL(enlace.href);
+}});
 
 function configurarSliderDual(prefijo, formatearValor) {{
     var elMin = document.getElementById('rango-' + prefijo + '-min');
