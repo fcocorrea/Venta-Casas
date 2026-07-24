@@ -2915,14 +2915,15 @@ def construir_popup(fila: pd.Series, moneda: str, posicion: int) -> str:
     hecha en UF convierta con la tasa que el sitio le aplicó a ella. Solo precio_real/q50/q05/q95
     cambian con la moneda -- residuo_pct (ya es %) y los atributos físicos no.
 
-    El ícono 🗑 (esquina inferior derecha) no elimina al primer click -- solo destapa la franja
-    `.vd-popup-confirm` (ver css_toolbar), que pide confirmación explícita ("Sí, eliminar" /
-    "Cancelar") antes de tocar el marcador. Se evita `window.confirm()` nativo a propósito: bloquea
-    el hilo del navegador y no se puede estilizar, así que la confirmación se resuelve inline con
-    CSS (misma idea que los paneles de filtro). `data-idx={posicion}` es la posición de esta fila
-    en `datos_mapa_js`/`marcadoresMapa` (mismo orden, ver el loop que llama a esta función) -- el
-    listener delegado en JS (ver script_filtros) la usa para ubicar el marcador sin buscarlo por
-    URL en cada click."""
+    Dos íconos en la esquina inferior derecha: ☆ (Favoritos, a la izquierda) alterna de inmediato
+    -- guardar/quitar es reversible, no necesita confirmación -- y 🗑 (a la derecha) no elimina al
+    primer click, solo destapa la franja `.vd-popup-confirm` (ver css_toolbar) que pide
+    confirmación explícita ("Sí, eliminar" / "Cancelar"). Se evita `window.confirm()` nativo a
+    propósito: bloquea el hilo del navegador y no se puede estilizar, así que la confirmación se
+    resuelve inline con CSS (misma idea que los paneles de filtro). `data-idx={posicion}` es la
+    posición de esta fila en `datos_mapa_js`/`marcadoresMapa` (mismo orden, ver el loop que llama a
+    esta función) -- los listeners delegados en JS (ver script_filtros) la usan para ubicar el
+    marcador sin buscarlo por URL en cada click."""
     if moneda == 'UF':
         tasa = fila['tasa_uf']
         precio_real, q50, q05, q95 = (fila['precio_real'] / tasa, fila['q50'] / tasa,
@@ -2940,7 +2941,10 @@ def construir_popup(fila: pd.Series, moneda: str, posicion: int) -> str:
             f"Dormitorios: {fila['Dormitorios']:.0f} | Baños: {fila['Baños']:.0f} | "
             f"Superficie total: {fila['Superficie total']:.0f} m²<br>"
             f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>"
+            f"<div class='vd-popup-iconos'>"
+            f"<button type='button' class='vd-popup-favorito' title='Guardar en Favoritos'>☆</button>"
             f"<button type='button' class='vd-popup-trash' title='Eliminar esta casa del dataset'>🗑</button>"
+            f"</div>"
             f"<div class='vd-popup-confirm'>"
             f"<span>¿Eliminar esta casa?</span>"
             f"<button type='button' class='vd-confirm-si'>Sí, eliminar</button>"
@@ -3074,13 +3078,17 @@ css_toolbar = """
 .vd-reset:hover { border-color: #0F766E; color: #0F766E; }
 .vd-counter { font-size: 12px; color: #6B7280; white-space: nowrap; margin-left: 12px; }
 .vd-popup-wrap { position: relative; padding-bottom: 32px; }
-.vd-popup-trash {
-  position: absolute; bottom: 0; right: 0; width: 26px; height: 26px;
+.vd-popup-iconos { position: absolute; bottom: 0; right: 0; display: flex; gap: 6px; }
+.vd-popup-favorito, .vd-popup-trash {
+  width: 26px; height: 26px; border-radius: 50%; border: 1px solid;
   display: flex; align-items: center; justify-content: center;
-  background: #FEF2F2; border: 1px solid #FECACA; border-radius: 50%;
   font-size: 13px; line-height: 1; cursor: pointer; padding: 0;
   transition: background 0.15s ease, transform 0.1s ease;
 }
+.vd-popup-favorito { background: #FFFBEB; border-color: #FDE68A; color: #B45309; }
+.vd-popup-favorito:hover { background: #FEF3C7; transform: scale(1.08); }
+.vd-popup-favorito.vd-favorito-activo { background: #FDE68A; color: #92400E; }
+.vd-popup-trash { background: #FEF2F2; border-color: #FECACA; color: #B91C1C; }
 .vd-popup-trash:hover { background: #FEE2E2; transform: scale(1.08); }
 .vd-popup-confirm {
   display: none; position: absolute; bottom: 0; left: 0; right: 0;
@@ -3088,7 +3096,7 @@ css_toolbar = """
   background: #FFFBEB; border: 1px solid #FDE68A; border-radius: 6px;
   padding: 5px 8px; font-size: 11.5px; color: #92400E;
 }
-.vd-popup-wrap.vd-confirmando .vd-popup-trash { display: none; }
+.vd-popup-wrap.vd-confirmando .vd-popup-iconos { display: none; }
 .vd-popup-wrap.vd-confirmando .vd-popup-confirm { display: flex; }
 .vd-confirm-si, .vd-confirm-no {
   border: none; border-radius: 4px; padding: 3px 8px; font-size: 11px;
@@ -3098,6 +3106,21 @@ css_toolbar = """
 .vd-confirm-si:hover { background: #991B1B; }
 .vd-confirm-no { background: #E5E7EB; color: #374151; }
 .vd-confirm-no:hover { background: #D1D5DB; }
+.vd-panel-derecha { left: auto; right: 0; }
+.vd-panel-favoritos { min-width: 260px; max-width: 320px; max-height: 260px; overflow-y: auto; }
+.vd-favoritos-vacio { margin: 0; font-size: 12.5px; color: #6B7280; }
+.vd-favoritos-lista { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.vd-favorito-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 12.5px; padding: 4px 0; border-bottom: 1px solid #F3F4F6;
+}
+.vd-favorito-item span { flex: 1; color: #374151; }
+.vd-favorito-item a { color: #0F766E; font-size: 12px; white-space: nowrap; }
+.vd-favorito-quitar {
+  border: none; background: none; color: #9CA3AF; cursor: pointer; font-size: 13px;
+  padding: 0 2px; line-height: 1;
+}
+.vd-favorito-quitar:hover { color: #B91C1C; }
 @media (max-width: 760px) {
   #toolbar-filtros { padding: 8px 10px; }
   .vd-counter { margin-left: 0; width: 100%; order: 99; }
@@ -3156,6 +3179,16 @@ html_toolbar = f"""
           title="Descarga las URLs marcadas con 'Eliminar esta casa' como exclusiones_manuales.txt -- guárdalo en la raíz del proyecto para que el próximo análisis las excluya">
     🗑 Exportar eliminadas (<span id="contador-eliminadas">0</span>)
   </button>
+  <div class="vd-group" data-grupo="favoritos">
+    <button type="button" class="vd-group__button">
+      <span class="vd-group__label">★ Favoritos</span>
+      <span class="vd-group__value" id="resumen-favoritos">0</span>
+    </button>
+    <div class="vd-panel vd-panel-derecha vd-panel-favoritos">
+      <p class="vd-favoritos-vacio" id="favoritos-vacio">Sin casas favoritas todavía.</p>
+      <ul class="vd-favoritos-lista" id="favoritos-lista"></ul>
+    </div>
+  </div>
   <span class="vd-counter" id="filtro-contador"></span>
 </div>
 """
@@ -3236,13 +3269,116 @@ function eliminarCasa(posicion) {{
     if ({nombre_js_mapa}.hasLayer(m)) {{ {nombre_js_mapa}.removeLayer(m); }}
     urlsEliminadas.push(m._datos.url);
     document.getElementById('contador-eliminadas').innerText = urlsEliminadas.length;
+    // Una casa eliminada del dataset no tiene sentido que siga en Favoritos.
+    if (m._favorito) {{ m._favorito = false; favoritos = favoritos.filter(function(i) {{ return i !== posicion; }}); renderizarFavoritos(); }}
     aplicarFiltrosMapaCompleto();
 }}
+
+// Favoritos: a diferencia de Eliminar, guardar/quitar es reversible -- alterna al primer click,
+// sin franja de confirmación. El estado vive en el marcador (m._favorito), no en el HTML estático
+// del popup (ese se regenera igual en cada open/rebind), por eso hace falta sincronizarlo a mano
+// cuando un popup se abre (ver mapaCompleto.on('popupopen', ...) más abajo) o cuando se quita
+// desde el panel del toolbar en vez de desde el popup mismo.
+var favoritos = [];
+
+function toggleFavorito(posicion) {{
+    var m = marcadoresMapa[posicion];
+    if (!m) {{ return false; }}
+    m._favorito = !m._favorito;
+    if (m._favorito) {{
+        favoritos.push(posicion);
+    }} else {{
+        favoritos = favoritos.filter(function(i) {{ return i !== posicion; }});
+    }}
+    renderizarFavoritos();
+    return m._favorito;
+}}
+
+function sincronizarEstrellaSiAbierta(posicion, activo) {{
+    var m = marcadoresMapa[posicion];
+    if (!m || !m.isPopupOpen || !m.isPopupOpen()) {{ return; }}
+    var el = m.getPopup().getElement();
+    var boton = el && el.querySelector('.vd-popup-favorito');
+    if (!boton) {{ return; }}
+    boton.classList.toggle('vd-favorito-activo', activo);
+    boton.textContent = activo ? '★' : '☆';
+    boton.title = activo ? 'Quitar de Favoritos' : 'Guardar en Favoritos';
+}}
+
+// Construye el panel de Favoritos con DOM API (no innerHTML) -- comuna/url vienen del scrape
+// (contenido externo), meterlas en innerHTML sería una inyección de HTML abierta.
+function renderizarFavoritos() {{
+    var resumen = document.getElementById('resumen-favoritos');
+    resumen.innerText = favoritos.length;
+    resumen.classList.toggle('vd-group__value--activo', favoritos.length > 0);
+
+    var lista = document.getElementById('favoritos-lista');
+    var vacio = document.getElementById('favoritos-vacio');
+    lista.innerHTML = '';
+    if (favoritos.length === 0) {{ vacio.style.display = 'block'; return; }}
+    vacio.style.display = 'none';
+
+    favoritos.forEach(function(posicion) {{
+        var d = marcadoresMapa[posicion]._datos;
+        var li = document.createElement('li');
+        li.className = 'vd-favorito-item';
+
+        var texto = document.createElement('span');
+        texto.textContent = d.comuna + ' — ' + Math.round(d.precio).toLocaleString('en-US') + ' CLP';
+
+        var enlace = document.createElement('a');
+        enlace.href = d.url;
+        enlace.target = '_blank';
+        enlace.rel = 'noopener';
+        enlace.textContent = 'Ver aviso';
+
+        var quitar = document.createElement('button');
+        quitar.type = 'button';
+        quitar.className = 'vd-favorito-quitar';
+        quitar.dataset.idx = posicion;
+        quitar.title = 'Quitar de Favoritos';
+        quitar.textContent = '✕';
+
+        li.appendChild(texto);
+        li.appendChild(enlace);
+        li.appendChild(quitar);
+        lista.appendChild(li);
+    }});
+}}
+
+// Si el popup que se está abriendo pertenece a un marcador ya favorito, la estrella tiene que
+// reflejarlo de inmediato -- el HTML del popup (construir_popup) siempre arranca en ☆.
+{nombre_js_mapa}.on('popupopen', function(e) {{
+    var m = e.popup._source;
+    if (!m || !m._favorito) {{ return; }}
+    var boton = e.popup.getElement().querySelector('.vd-popup-favorito');
+    if (boton) {{
+        boton.classList.add('vd-favorito-activo');
+        boton.textContent = '★';
+        boton.title = 'Quitar de Favoritos';
+    }}
+}});
 
 // El ícono 🗑 no elimina directo -- primero destapa `.vd-popup-confirm` (ver construir_popup en
 // Python) y recién al clickear "Sí, eliminar" ahí se llama a eliminarCasa. "Cancelar" (o abrir otro
 // popup, que descarta el HTML viejo) vuelve a tapar la franja de confirmación.
 document.addEventListener('click', function(e) {{
+    var favorito = e.target.closest('.vd-popup-favorito');
+    if (favorito) {{
+        var idxFavorito = parseInt(favorito.closest('.vd-popup-wrap').dataset.idx, 10);
+        var activo = toggleFavorito(idxFavorito);
+        sincronizarEstrellaSiAbierta(idxFavorito, activo);
+        return;
+    }}
+
+    var quitarFavorito = e.target.closest('.vd-favorito-quitar');
+    if (quitarFavorito) {{
+        var idxQuitar = parseInt(quitarFavorito.dataset.idx, 10);
+        var activo2 = toggleFavorito(idxQuitar);
+        sincronizarEstrellaSiAbierta(idxQuitar, activo2);
+        return;
+    }}
+
     var trash = e.target.closest('.vd-popup-trash');
     if (trash) {{ trash.closest('.vd-popup-wrap').classList.add('vd-confirmando'); return; }}
 
