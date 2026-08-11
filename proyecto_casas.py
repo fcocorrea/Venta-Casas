@@ -816,7 +816,8 @@ if not na_summary.empty:
 corr = deptos_df.corr(numeric_only=True)
 corr = corr.dropna(axis=0, how='all').dropna(axis=1, how='all')
 plt.figure(figsize=(12, 10))
-sns.heatmap(corr, cmap="Blues", annot=True)
+sns.heatmap(corr, cmap="Blues", annot=False, xticklabels=1, yticklabels=1)
+plt.tight_layout()
 plt.savefig(os.path.join(GRAFICOS_DIR, 'correlacion_atributos.png'))
 
 # =======================================================================================
