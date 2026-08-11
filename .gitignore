@@ -12,3 +12,9 @@ venv/
 # negaciones de /.claude/ a propósito: en .gitignore gana el último patrón que matchea.
 .agents/
 .claude/skills/
+
+# Salidas que proyecto_casas.py regenera enteras en cada corrida. No se versionan: son binarios
+# (o un HTML de ~24k líneas) que cambian por completo cada noche sin diff revisable.
+casas_limpios.xlsx
+casas_candidatas.xlsx
+gráficos/mapa_intervalos.html
