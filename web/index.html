@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZoneCheck — Precios que sí calzan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,440;9..144,560;9..144,650&family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper-0:#ffffff;
+    --paper-50:#f7f4ec;
+    --paper-100:#efe8d5;
+    --ink-900:#101c16;
+    --ink-700:#24352c;
+    --moss-500:#3e8b5d;
+    --moss-600:#2e6e48;
+    --moss-100:#e3efdf;
+    --clay-500:#c24b3b;
+    --clay-100:#f6e2dc;
+    --graphite-600:#4b5048;
+    --graphite-400:#848d82;
+    --line-200:#e6e0cd;
+    --focus-ring:#2e6e48;
+  }
+
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    font-family:'Manrope',system-ui,sans-serif;
+    background:var(--paper-0);
+    color:var(--ink-700);
+  }
+  img{display:block; max-width:100%;}
+  a{color:inherit;}
+
+  @media (prefers-reduced-motion:no-preference){
+    .reveal{animation:rise .7s cubic-bezier(.2,.7,.2,1) both;}
+  }
+  @keyframes rise{from{opacity:0; transform:translateY(14px);}to{opacity:1; transform:none;}}
+
+  .eyebrow{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:.72rem;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+  }
+
+  .btn{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    gap:.4rem;
+    padding:.72rem 1.35rem;
+    border-radius:999px;
+    font-family:'Manrope',system-ui,sans-serif;
+    font-size:.92rem;
+    font-weight:700;
+    text-decoration:none;
+    cursor:pointer;
+    border:1px solid transparent;
+    transition:background-color .15s ease, color .15s ease, border-color .15s ease;
+  }
+  .btn--primary{background:var(--moss-500); color:#fff;}
+  .btn--primary:hover{background:var(--moss-600);}
+  .btn--ghost{background:transparent; color:var(--ink-900); border-color:var(--line-200);}
+  .btn--ghost:hover{border-color:var(--ink-900);}
+  .btn:focus-visible{outline:2px solid var(--focus-ring); outline-offset:2px;}
+
+  /* ---------- nav ---------- */
+  .nav{
+    position:sticky;
+    top:0;
+    z-index:10;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:1.1rem clamp(1.5rem, 5vw, 4rem);
+    background:rgba(255,255,255,.92);
+    backdrop-filter:blur(6px);
+    border-bottom:1px solid var(--line-200);
+  }
+  .nav__mark{
+    font-family:'Fraunces',serif;
+    font-optical-sizing:auto;
+    font-weight:600;
+    font-size:1.4rem;
+    letter-spacing:-.01em;
+    color:var(--ink-900);
+    text-decoration:none;
+  }
+  .nav__actions{display:flex; align-items:center; gap:1.4rem;}
+  .nav__login{
+    font-size:.92rem;
+    font-weight:600;
+    text-decoration:none;
+    color:var(--ink-700);
+  }
+  .nav__login:hover{color:var(--moss-600);}
+
+  /* ---------- hero ---------- */
+  .hero{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:clamp(2rem, 5vw, 4rem);
+    align-items:center;
+    padding:clamp(3rem, 7vw, 5.5rem) clamp(1.5rem, 5vw, 4rem);
+    max-width:1280px;
+    margin:0 auto;
+  }
+  .hero__eyebrow{color:var(--moss-600); margin:0 0 1rem;}
+  .hero__title{
+    margin:0 0 1.2rem;
+    font-family:'Fraunces',serif;
+    font-optical-sizing:auto;
+    font-weight:560;
+    font-size:clamp(2.3rem, 4.2vw, 3.4rem);
+    line-height:1.08;
+    letter-spacing:-.01em;
+    color:var(--ink-900);
+  }
+  .hero__sub{
+    margin:0 0 2rem;
+    max-width:46ch;
+    font-size:1.05rem;
+    line-height:1.6;
+    color:var(--graphite-600);
+  }
+  .hero__ctas{display:flex; flex-wrap:wrap; gap:.9rem;}
+
+  .hero__frame{
+    position:relative;
+    border-radius:16px;
+    overflow:hidden;
+    box-shadow:0 24px 60px -24px rgba(16,28,22,.35);
+    border:1px solid var(--line-200);
+  }
+  .hero__frame img{width:100%; height:auto;}
+  .hero__tag{
+    position:absolute;
+    left:1.1rem;
+    bottom:1.1rem;
+    font-family:'IBM Plex Mono',monospace;
+    font-size:.7rem;
+    letter-spacing:.08em;
+    color:var(--paper-0);
+    background:rgba(16,28,22,.72);
+    padding:.4rem .65rem;
+    border-radius:4px;
+  }
+
+  /* ---------- section shell ---------- */
+  .section{
+    padding:clamp(3.5rem, 7vw, 6rem) clamp(1.5rem, 5vw, 4rem);
+  }
+  .section--paper{background:var(--paper-50);}
+  .section__inner{max-width:1180px; margin:0 auto;}
+  .section__eyebrow{color:var(--clay-500); margin:0 0 .8rem;}
+  .section__title{
+    margin:0 0 .8rem;
+    font-family:'Fraunces',serif;
+    font-optical-sizing:auto;
+    font-weight:560;
+    font-size:clamp(1.7rem, 2.8vw, 2.3rem);
+    color:var(--ink-900);
+  }
+  .section__sub{
+    margin:0 0 2.6rem;
+    max-width:60ch;
+    font-size:1rem;
+    line-height:1.6;
+    color:var(--graphite-600);
+  }
+
+  /* ---------- steps ---------- */
+  .steps{
+    display:grid;
+    grid-template-columns:repeat(3, 1fr);
+    gap:2rem;
+  }
+  .step{padding-top:1.4rem; border-top:2px solid var(--ink-900);}
+  .step__num{
+    font-family:'IBM Plex Mono',monospace;
+    font-size:.8rem;
+    color:var(--moss-600);
+  }
+  .step__title{
+    margin:.6rem 0 .5rem;
+    font-family:'Fraunces',serif;
+    font-weight:560;
+    font-size:1.2rem;
+    color:var(--ink-900);
+  }
+  .step__body{margin:0; font-size:.94rem; line-height:1.6; color:var(--graphite-600);}
+
+  /* ---------- proof / feature ---------- */
+  .proof{
+    display:grid;
+    grid-template-columns:1.1fr .9fr;
+    gap:clamp(2rem, 5vw, 4rem);
+    align-items:center;
+  }
+  .proof__frame{
+    border-radius:16px;
+    overflow:hidden;
+    border:1px solid var(--line-200);
+    box-shadow:0 20px 48px -24px rgba(16,28,22,.28);
+  }
+  .proof__frame img{width:100%; height:auto;}
+  .proof__callout{
+    display:inline-flex;
+    align-items:center;
+    gap:.5rem;
+    margin-bottom:1.1rem;
+    padding:.4rem .8rem;
+    border-radius:999px;
+    background:var(--clay-100);
+    color:var(--clay-500);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:.72rem;
+    letter-spacing:.06em;
+  }
+  .proof__title{
+    margin:0 0 .9rem;
+    font-family:'Fraunces',serif;
+    font-weight:560;
+    font-size:1.6rem;
+    color:var(--ink-900);
+  }
+  .proof__body{margin:0 0 1.6rem; font-size:.98rem; line-height:1.65; color:var(--graphite-600);}
+  .proof__list{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.7rem;}
+  .proof__list li{
+    display:flex;
+    gap:.7rem;
+    font-size:.92rem;
+    line-height:1.5;
+    color:var(--ink-700);
+  }
+  .proof__list b{
+    font-family:'IBM Plex Mono',monospace;
+    font-weight:500;
+    color:var(--moss-600);
+    flex:0 0 7.5rem;
+    white-space:nowrap;
+  }
+
+  /* ---------- coverage ---------- */
+  .coverage__chips{
+    display:flex;
+    flex-wrap:wrap;
+    gap:.9rem;
+    margin-bottom:1.8rem;
+  }
+  .chip{
+    display:flex;
+    flex-direction:column;
+    gap:.15rem;
+    padding:.8rem 1.1rem;
+    border-radius:10px;
+    background:var(--paper-0);
+    border:1px solid var(--line-200);
+  }
+  .chip__name{font-size:.92rem; font-weight:700; color:var(--ink-900);}
+  .chip__coord{font-family:'IBM Plex Mono',monospace; font-size:.72rem; color:var(--graphite-400);}
+  .coverage__note{
+    max-width:60ch;
+    font-size:.94rem;
+    line-height:1.6;
+    color:var(--graphite-600);
+    border-left:2px solid var(--moss-500);
+    padding-left:1rem;
+  }
+
+  /* ---------- final cta ---------- */
+  .cta{
+    background:var(--ink-900);
+    color:var(--paper-50);
+    text-align:center;
+    padding:clamp(3.5rem, 8vw, 5.5rem) 1.5rem;
+  }
+  .cta__title{
+    margin:0 0 .8rem;
+    font-family:'Fraunces',serif;
+    font-optical-sizing:auto;
+    font-weight:560;
+    font-size:clamp(1.8rem, 3.4vw, 2.5rem);
+  }
+  .cta__sub{margin:0 auto 2rem; max-width:44ch; font-size:1rem; color:var(--paper-100); opacity:.85;}
+
+  /* ---------- footer ---------- */
+  .footer{
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    justify-content:space-between;
+    gap:1rem;
+    padding:1.8rem clamp(1.5rem, 5vw, 4rem);
+    border-top:1px solid var(--line-200);
+    font-size:.85rem;
+    color:var(--graphite-400);
+  }
+  .footer__mark{
+    font-family:'Fraunces',serif;
+    font-weight:600;
+    color:var(--ink-900);
+  }
+  .footer a{text-decoration:underline; color:var(--graphite-600);}
+
+  /* ---------- responsive ---------- */
+  @media (max-width:860px){
+    .hero, .proof{grid-template-columns:1fr;}
+    .hero__frame{order:-1;}
+    .steps{grid-template-columns:1fr;}
+    .nav__login{display:none;}
+  }
+</style>
+</head>
+<body>
+
+  <nav class="nav">
+    <a class="nav__mark" href="index.html">ZoneCheck</a>
+    <div class="nav__actions">
+      <a class="nav__login" href="login.html">Iniciar sesión</a>
+      <a class="btn btn--primary" href="login.html">Registrarse</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="reveal">
+      <p class="eyebrow hero__eyebrow">Vitacura · Las Condes · Lo Barnechea</p>
+      <h1 class="hero__title">Antes de ofertar, revisa si el precio realmente calza.</h1>
+      <p class="hero__sub">ZoneCheck compara cada casa en venta contra un modelo entrenado con miles de propiedades del sector, y marca en el mapa las que están fuera de precio — para arriba o para abajo.</p>
+      <div class="hero__ctas">
+        <a class="btn btn--primary" href="login.html">Registrarse</a>
+        <a class="btn btn--ghost" href="#como-funciona">Ver cómo funciona</a>
+      </div>
+    </div>
+    <div class="hero__frame reveal">
+      <img src="assets/mapa-fondo.jpg" alt="Mapa de ZoneCheck mostrando casas sobrevaloradas y bajo valor en Vitacura, Las Condes y Lo Barnechea">
+      <span class="hero__tag">5.284 casas en seguimiento</span>
+    </div>
+  </header>
+
+  <section class="section section--paper" id="como-funciona">
+    <div class="section__inner">
+      <p class="eyebrow section__eyebrow">Cómo funciona</p>
+      <h2 class="section__title">De un scrape nocturno a un mapa listo en la mañana</h2>
+      <p class="section__sub">Todo el proceso corre solo, sin que tengas que revisar nada manualmente.</p>
+      <div class="steps">
+        <div class="step">
+          <span class="step__num">01</span>
+          <h3 class="step__title">Rastreamos</h3>
+          <p class="step__body">Recorremos Portal Inmobiliario todas las noches y sumamos cada casa nueva publicada en la zona a la base.</p>
+        </div>
+        <div class="step">
+          <span class="step__num">02</span>
+          <h3 class="step__title">Modelamos</h3>
+          <p class="step__body">Un modelo entrenado con miles de propiedades calcula cuánto debería valer cada una, con un rango de error incluido.</p>
+        </div>
+        <div class="step">
+          <span class="step__num">03</span>
+          <h3 class="step__title">Señalamos</h3>
+          <p class="step__body">Si el precio pedido cae fuera de ese rango, la marcamos en el mapa: sobrevalorada o bajo el valor de mercado.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section__inner proof">
+      <div class="proof__frame">
+        <img src="assets/mapa-popup.jpg" alt="Detalle de una casa en Las Condes: precio real, precio predicho, intervalo de confianza y residuo">
+      </div>
+      <div>
+        <span class="proof__callout">+26,4% sobre el intervalo</span>
+        <h2 class="proof__title">Cada punto es una casa real, con los números a la vista</h2>
+        <p class="proof__body">Al hacer clic en cualquier punto del mapa ves el precio real publicado, lo que el modelo predijo y el rango donde debería estar. Esta casa de Las Condes pide 26,4% más que el techo de su propio intervalo.</p>
+        <ul class="proof__list">
+          <li><b>Precio real</b> Lo que pide el aviso hoy.</li>
+          <li><b>Predicho</b> Lo que el modelo estima según el sector, tamaño y características.</li>
+          <li><b>Intervalo 90%</b> El rango donde el precio debería caer, calculado por comuna.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section--paper">
+    <div class="section__inner">
+      <p class="eyebrow section__eyebrow">Cobertura</p>
+      <h2 class="section__title">Hoy cubrimos tres comunas</h2>
+      <div class="coverage__chips">
+        <div class="chip">
+          <span class="chip__name">Vitacura</span>
+          <span class="chip__coord">33.3833° S · 70.5667° O</span>
+        </div>
+        <div class="chip">
+          <span class="chip__name">Las Condes</span>
+          <span class="chip__coord">33.4089° S · 70.5183° O</span>
+        </div>
+        <div class="chip">
+          <span class="chip__name">Lo Barnechea</span>
+          <span class="chip__coord">33.3550° S · 70.5017° O</span>
+        </div>
+      </div>
+      <p class="coverage__note">Le sigue el resto de la Región Metropolitana — casas y departamentos, en venta y en arriendo.</p>
+    </div>
+  </section>
+
+  <section class="cta">
+    <h2 class="cta__title">Sé de los primeros en tener acceso</h2>
+    <p class="cta__sub">ZoneCheck es un servicio por suscripción. Regístrate para reservar tu cupo cuando abramos el acceso.</p>
+    <a class="btn btn--primary" href="login.html">Registrarse</a>
+  </section>
+
+  <footer class="footer">
+    <span class="footer__mark">ZoneCheck</span>
+    <span>Vitacura · Las Condes · Lo Barnechea</span>
+    <a href="login.html">Iniciar sesión</a>
+  </footer>
+
+</body>
+</html>
