@@ -225,6 +225,19 @@
   .form-pane__foot a{color:var(--clay-600); text-decoration:underline;}
   .form-pane__foot a:focus-visible{outline:2px solid var(--focus-ring); outline-offset:2px;}
 
+  .login-form__error{
+    display:none;
+    margin:0;
+    padding:.65rem .85rem;
+    border-radius:4px;
+    background:var(--clay-100, #f6e2dc);
+    border:1px solid var(--clay-500);
+    color:var(--clay-600);
+    font-size:.85rem;
+    line-height:1.4;
+  }
+  .login-form__error.is-visible{display:block;}
+
   /* ---------- responsive ---------- */
   @media (max-width:860px){
     .stage{flex-direction:column;}
@@ -268,7 +281,8 @@
         <h1 class="form-pane__title">Inicia sesión</h1>
         <p class="form-pane__sub">Visualiza el mapa de precios en Vitacura, Las Condes y Lo Barnechea.</p>
 
-        <form class="login-form" autocomplete="on">
+        <form class="login-form" id="login-form" autocomplete="on" novalidate>
+          <p class="login-form__error" id="login-error" role="alert">Usuario o contraseña incorrectos.</p>
           <label class="field">
             <span class="field__label">Usuario</span>
             <input class="field__input" type="text" name="username" autocomplete="username" required placeholder="tu@correo.cl">
@@ -284,5 +298,24 @@
       </div>
     </section>
   </div>
+
+  <script>
+    const DEMO_USER = 'fjcorreaa@gmail.com';
+    const DEMO_PASS = 'clp4429';
+    const form = document.getElementById('login-form');
+    const errorBox = document.getElementById('login-error');
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const username = form.username.value.trim();
+      const password = form.password.value;
+
+      if (username === DEMO_USER && password === DEMO_PASS) {
+        window.location.href = '../gráficos/mapa_intervalos_completo.html';
+      } else {
+        errorBox.classList.add('is-visible');
+      }
+    });
+  </script>
 </body>
 </html>

@@ -18,8 +18,15 @@ A Scrapy project that scrapes house listings ("casa") for sale in three Santiago
 # Debug a specific issue at DEBUG log level, capped so it doesn't run for hours
 ./venv/Scripts/python.exe -m scrapy crawl casas -L DEBUG -s CLOSESPIDER_ITEMCOUNT=50
 
+# Regenerate the three synthetic categories (casa arriendo, depto venta, depto arriendo) that
+# proyecto_casas.py's map merges in alongside real casas venta -- see generar_datos_sinteticos.py.
+# Only needs to be rerun if that script changes; its seeds are fixed, so re-running without
+# changes reproduces the same three files byte for byte.
+./venv/Scripts/python.exe generar_datos_sinteticos.py
+
 # Full analysis: cleaning, features, CV, model, intervals, ranking, export, map. Takes several
-# minutes (repeated CV + nested feature-selection CV + hyperparameter search), not seconds.
+# minutes (repeated CV + nested feature-selection CV + hyperparameter search), not seconds. Fails
+# fast if the synthetic JSONs above don't exist yet.
 ./venv/Scripts/python.exe proyecto_casas.py
 
 # Full nightly pipeline (what the scheduled task runs)
@@ -62,6 +69,28 @@ Price intervals (PASO 5e) come from conformalized quantile regression (three `Hi
 
 It writes `casas_limpios.xlsx` (full cleaned dataset), `casas_candidatas.xlsx` (test-set listings flagged as outside their predicted interval — under- **or** over-market, ranked by distance to the edge; listings that fall inside their interval are excluded, and train-set listings are excluded because their predictions are in-sample), plus the charts under `gráficos/` and two interactive maps (`gráficos/mapa_intervalos.html` for test only, `gráficos/mapa_intervalos_completo.html` for the full dataset with a filter toolbar — price range, comuna, dormitorios/baños/superficie minimums, all client-side JS/Leaflet, no external services) — all committed to the repo and overwritten on each run.
 
+### Synthetic categories on the map (`generar_datos_sinteticos.py`)
+
+The scraper and model only cover "casa en venta" — nothing else is scraped yet. The site (`web/`)
+shows four categories (casa venta, casa arriendo, depto venta, depto arriendo) with a filter that
+never mixes them, so `generar_datos_sinteticos.py` fabricates the other three: it seeds each
+synthetic listing's coordinates by jittering (~250 m gaussian) around a real geocoded point from
+`casas.json` in the same comuna (so points land on real streets, not in a park), then prices it with
+a simple hedonic formula (CLP/m² by comuna and category × dormitorio/antigüedad adjustments) plus
+log-normal noise, deriving q05/q50/q95 from that same noise band (~90% coverage, matching the real
+model's target). It writes `casas_arriendo_sintetico.json`, `departamentos_venta_sintetico.json`,
+and `departamentos_arriendo_sintetico.json` (gitignored like `casas.json` — regenerable, fixed
+seeds). PASO 5i (extra 3) in `proyecto_casas.py` loads these three, tags them with a `categoria`
+column (real casas venta get `casa_venta`), and concatenates them onto `mapa_datos_completo` — no
+retraining, since each synthetic row already carries its own precio_real/q05/q50/q95. The map's
+toolbar gets a segmented "categoría" control (mutually exclusive, never shows two categories at
+once) that also rescales the price/dormitorios/baños/superficie sliders per category, since a
+monthly rent and a sale price don't share a scale. Popups on synthetic rows carry a "dato sintético"
+badge and skip the "Ver aviso" link (the URL isn't a real listing). When a real scraper + model
+exists for one of these three, its loader only needs to produce a DataFrame with the same columns
+(comuna/latitud/longitud/precio_real/q05/q50/q95/residuo_pct/flag/url + physical attributes) to
+replace the synthetic one — the rest of PASO 5i doesn't change.
+
 ## Data flow
 
 ```
@@ -71,9 +100,15 @@ scrapy crawl casas -O casas.json   (gitignored, one run's worth of raw listings)
 proyecto_casas.py   (EDA -> cleaning -> lat/lon imputation -> feature engineering -> CV ->
                       quantile regression intervals -> flag/rank flagged listings)
         |
+        +-- generar_datos_sinteticos.py --> *_sintetico.json (casa arriendo, depto venta,
+        |     (gitignored, fixed seeds -- see       depto arriendo -- fabricated, see the
+        |      CLAUDE.md section above)              "Synthetic categories" section above)
+        |         |
+        |         v  (PASO 5i extra 3: tag + concat, no retraining)
         v
 casas_limpios.xlsx, casas_candidatas.xlsx, gráficos/*.png, gráficos/mapa_*.html
-        (committed, overwritten each run)
+        (committed, overwritten each run; mapa_intervalos_completo.html carries all four
+        categories behind the toolbar's categoría filter)
 ```
 
 `*.json` and `crawl_log.txt` are gitignored — scrape output and run logs are never committed.

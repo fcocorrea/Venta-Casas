@@ -2909,6 +2909,59 @@ mapa_datos_completo = mapa_datos_completo.join(tasa_uf_por_fila.rename('tasa_uf'
 # tasas efectivamente usadas, dominada por la tasa propia de las publicaciones en UF (la mayoría).
 VALOR_UF_REFERENCIA = float(mapa_datos_completo['tasa_uf'].median())
 
+# =======================================================================================
+# PASO 5i (extra 3) -- CATEGORÍAS SINTÉTICAS (casa arriendo, depto venta, depto arriendo)
+# =======================================================================================
+# El scraper y el modelo de PASO 1-5 solo cubren "casa en venta" (ver encabezado del archivo). El
+# sitio (ver web/) muestra cuatro categorías con un filtro que nunca las mezcla -- para eso,
+# `mapa_datos_completo` se completa acá con las otras tres, generadas por
+# generar_datos_sinteticos.py (dato FABRICADO, no un aviso real -- ver el encabezado de ese script
+# para el porqué y para cómo se calculan precio_real/q05/q50/q95). El merge es deliberadamente
+# simple: cada fila sintética ya trae esas columnas calculadas, así que solo hace falta homologarlas
+# con las de `mapa_datos_completo` y concatenar -- ninguna de las cuatro categorías se reentrena ni
+# se recalcula acá. El día que exista un scraper + modelo real para alguna de las tres, basta con
+# que su loader entregue un DataFrame con estas mismas columnas -- el resto del mapa no cambia.
+
+ETIQUETA_CATEGORIA = {
+    'casa_venta': 'Casa en venta',
+    'casa_arriendo': 'Casa en arriendo',
+    'depto_venta': 'Depto. en venta',
+    'depto_arriendo': 'Depto. en arriendo',
+}
+
+ARCHIVOS_CATEGORIA_SINTETICA = {
+    'casa_arriendo': 'casas_arriendo_sintetico.json',
+    'depto_venta': 'departamentos_venta_sintetico.json',
+    'depto_arriendo': 'departamentos_arriendo_sintetico.json',
+}
+
+mapa_datos_completo['categoria'] = 'casa_venta'
+mapa_datos_completo['es_sintetico'] = False
+
+
+def cargar_categoria_sintetica(categoria: str, ruta_json: str) -> pd.DataFrame:
+    """Lee un JSON de generar_datos_sinteticos.py y lo deja con exactamente las mismas columnas que
+    `mapa_datos_completo` para poder concatenarlo sin más transformación. Sin tasa UF propia (no hay
+    un scrape real detrás de estas filas): usa VALOR_UF_REFERENCIA para toda la categoría, igual que
+    el respaldo que ya se usa arriba para filas reales sin tasa propia."""
+    if not os.path.exists(ruta_json):
+        raise FileNotFoundError(
+            f'Falta {ruta_json} -- corre `python generar_datos_sinteticos.py` antes de '
+            f'proyecto_casas.py para generar las categorías sintéticas del mapa.')
+    filas = pd.read_json(ruta_json)
+    filas['fold'] = 'sintético'
+    filas['tasa_uf'] = VALOR_UF_REFERENCIA
+    filas['categoria'] = categoria
+    filas['es_sintetico'] = True
+    return filas[mapa_datos_completo.columns]
+
+
+categorias_sinteticas = {categoria: cargar_categoria_sintetica(categoria, ruta)
+                          for categoria, ruta in ARCHIVOS_CATEGORIA_SINTETICA.items()}
+mapa_datos_completo = pd.concat([mapa_datos_completo, *categorias_sinteticas.values()], ignore_index=True)
+print('Categorías sintéticas agregadas al mapa: ' + ', '.join(
+    f'{ETIQUETA_CATEGORIA[categoria]} ({len(df)})' for categoria, df in categorias_sinteticas.items()))
+
 
 def construir_popup(fila: pd.Series, moneda: str, posicion: int) -> str:
     """Arma el popup de un punto en la moneda pedida ('CLP' o 'UF'). La conversión usa la tasa
@@ -2924,7 +2977,11 @@ def construir_popup(fila: pd.Series, moneda: str, posicion: int) -> str:
     resuelve inline con CSS (misma idea que los paneles de filtro). `data-idx={posicion}` es la
     posición de esta fila en `datos_mapa_js`/`marcadoresMapa` (mismo orden, ver el loop que llama a
     esta función) -- los listeners delegados en JS (ver script_filtros) la usan para ubicar el
-    marcador sin buscarlo por URL en cada click."""
+    marcador sin buscarlo por URL en cada click.
+
+    Filas sintéticas (ver PASO 5i extra 3) llevan una franja aparte marcándolas como demo y no
+    ofrecen "Ver aviso" -- su url no apunta a ninguna publicación real, mostrarla como link normal
+    engañaría al usuario."""
     if moneda == 'UF':
         tasa = fila['tasa_uf']
         precio_real, q50, q05, q95 = (fila['precio_real'] / tasa, fila['q50'] / tasa,
@@ -2933,21 +2990,26 @@ def construir_popup(fila: pd.Series, moneda: str, posicion: int) -> str:
     else:
         precio_real, q50, q05, q95 = fila['precio_real'], fila['q50'], fila['q05'], fila['q95']
         formato = '{:,.0f}'
+    aviso_html = (f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>" if not fila['es_sintetico']
+                  else "<span style='color:#9CA3AF;'>Dato de demostración (sin aviso real)</span>")
+    badge_sintetico = ("<div style='color:#B45309;font-size:11px;margin-bottom:4px;'>"
+                        "🧪 Dato sintético -- solo demostración</div>" if fila['es_sintetico'] else "")
     return (f"<div class='vd-popup-wrap' data-idx='{posicion}'>"
-            f"<b>{fila['comuna']}</b> ({fila['fold']})<br>"
+            f"{badge_sintetico}"
+            f"<b>{fila['comuna']}</b> — {ETIQUETA_CATEGORIA[fila['categoria']]}<br>"
             f"Precio real: {formato.format(precio_real)} {moneda}<br>"
             f"Predicho (q50): {formato.format(q50)} {moneda}<br>"
             f"Intervalo 90%: [{formato.format(q05)}, {formato.format(q95)}] {moneda}<br>"
             f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
             f"Dormitorios: {fila['Dormitorios']:.0f} | Baños: {fila['Baños']:.0f} | "
             f"Superficie total: {fila['Superficie total']:.0f} m²<br>"
-            f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>"
+            f"{aviso_html}"
             f"<div class='vd-popup-iconos'>"
             f"<button type='button' class='vd-popup-favorito' title='Guardar en Favoritos'>☆</button>"
-            f"<button type='button' class='vd-popup-trash' title='Eliminar esta casa del dataset'>🗑</button>"
+            f"<button type='button' class='vd-popup-trash' title='Eliminar esta propiedad del dataset'>🗑</button>"
             f"</div>"
             f"<div class='vd-popup-confirm'>"
-            f"<span>¿Eliminar esta casa?</span>"
+            f"<span>¿Eliminar esta propiedad?</span>"
             f"<button type='button' class='vd-confirm-si'>Sí, eliminar</button>"
             f"<button type='button' class='vd-confirm-no'>Cancelar</button>"
             f"</div>"
@@ -2966,6 +3028,7 @@ for posicion, (idx, fila) in enumerate(mapa_datos_completo.iterrows()):
         'popupClp': construir_popup(fila, 'CLP', posicion),
         'popupUf': construir_popup(fila, 'UF', posicion),
         'comuna': fila['comuna'],
+        'categoria': fila['categoria'],
         'url': fila['url'],
         'precio': float(fila['precio_real']),
         'dormitorios': float(fila['Dormitorios']),
@@ -2979,12 +3042,35 @@ for posicion, (idx, fila) in enumerate(mapa_datos_completo.iterrows()):
 # CDN: este HTML tiene que abrirse offline como archivo local, así que el CSS va inline, sin
 # dependencias externas que puedan fallar sin internet.
 
-precio_min_dato, precio_max_dato = mapa_datos_completo['precio_real'].min(), mapa_datos_completo['precio_real'].max()
-precio_min_millones = int(np.floor(precio_min_dato / 1e6))
-precio_max_millones = int(np.ceil(precio_max_dato / 1e6))
-dorm_max_dato = int(mapa_datos_completo['Dormitorios'].max())
-banos_max_dato = int(mapa_datos_completo['Baños'].max())
-superficie_max_dato = int(np.ceil(mapa_datos_completo['Superficie total'].max() / 10) * 10)
+# Los rangos de precio/dormitorios/baños/superficie NO se calculan sobre las cuatro categorías
+# juntas -- una casa en venta y un depto en arriendo viven en escalas de precio completamente
+# distintas (cientos de millones vs. cientos de miles mensuales), así que un rango único haría
+# el slider inútil para casi cualquier categoría. Cada categoría tiene su propio rango
+# (`limites_por_categoria`, ver script_filtros más abajo) y el toolbar cambia el rango activo del
+# slider al cambiar de categoría -- los <input> HTML de abajo solo fijan los valores iniciales,
+# que corresponden a CATEGORIA_INICIAL (la pestaña activa al abrir el mapa).
+
+
+def calcular_limites_categoria(df_categoria: pd.DataFrame) -> dict:
+    return {
+        'precio': [int(np.floor(df_categoria['precio_real'].min() / 1e6)),
+                   int(np.ceil(df_categoria['precio_real'].max() / 1e6))],
+        'dormitorios': [0, int(df_categoria['Dormitorios'].max())],
+        'banos': [0, int(df_categoria['Baños'].max())],
+        'superficie': [0, int(np.ceil(df_categoria['Superficie total'].max() / 10) * 10)],
+    }
+
+
+limites_por_categoria = {
+    categoria: calcular_limites_categoria(mapa_datos_completo[mapa_datos_completo['categoria'] == categoria])
+    for categoria in ETIQUETA_CATEGORIA
+}
+
+CATEGORIA_INICIAL = 'casa_venta'
+precio_min_millones, precio_max_millones = limites_por_categoria[CATEGORIA_INICIAL]['precio']
+dorm_max_dato = limites_por_categoria[CATEGORIA_INICIAL]['dormitorios'][1]
+banos_max_dato = limites_por_categoria[CATEGORIA_INICIAL]['banos'][1]
+superficie_max_dato = limites_por_categoria[CATEGORIA_INICIAL]['superficie'][1]
 comunas_disponibles = sorted(mapa_datos_completo['comuna'].dropna().unique().tolist())
 nombre_js_mapa = mapa_completo.get_name()
 
@@ -3014,6 +3100,17 @@ css_toolbar = """
 }
 .vd-moneda-toggle:hover { background: #0d5f58; }
 .vd-moneda-toggle:active { transform: scale(0.96); }
+.vd-categoria-tabs {
+  display: flex; flex-wrap: wrap; gap: 4px; margin-right: 14px;
+  padding: 3px; background: #F3F4F6; border-radius: 8px;
+}
+.vd-categoria-tab {
+  border: none; background: transparent; padding: 6px 11px; border-radius: 6px;
+  font-family: inherit; font-size: 12px; font-weight: 600; color: #6B7280;
+  cursor: pointer; white-space: nowrap; transition: background 0.15s ease, color 0.15s ease;
+}
+.vd-categoria-tab:hover { color: #111827; }
+.vd-categoria-tab.vd-categoria-activa { background: #0F766E; color: #ffffff; }
 .vd-group { position: relative; }
 .vd-group__button {
   display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
@@ -3142,7 +3239,7 @@ checkboxes_comuna_html = ''.join(
 )
 
 
-def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, paso: int = 1,
+def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, paso: float = 1,
                    permitir_valor_exacto: bool = False) -> str:
     # `permitir_valor_exacto` agrega dos <input type="number"> arriba del slider -- alternativa
     # para escribir el monto exacto en vez de arrastrar. Por ahora solo Precio lo pide.
@@ -3176,11 +3273,20 @@ def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, p
 """
 
 
+categoria_tabs_html = ''.join(
+    f'<button type="button" class="vd-categoria-tab{" vd-categoria-activa" if categoria == CATEGORIA_INICIAL else ""}" '
+    f'data-categoria="{categoria}">{etiqueta}</button>'
+    for categoria, etiqueta in ETIQUETA_CATEGORIA.items()
+)
+
 html_toolbar = f"""
 <div id="toolbar-filtros">
-  <span class="vd-brand">Casas — filtros</span>
+  <span class="vd-brand">ZoneCheck — filtros</span>
+  <div class="vd-categoria-tabs" role="tablist" aria-label="Categoría de propiedad">
+    {categoria_tabs_html}
+  </div>
   <button type="button" class="vd-moneda-toggle" id="toggle-moneda" title="Cambiar precios entre CLP y UF">UF</button>
-  {bloque_slider('precio', 'Precio (M CLP)', precio_min_millones, precio_max_millones, permitir_valor_exacto=True)}
+  {bloque_slider('precio', 'Precio (M CLP)', precio_min_millones, precio_max_millones, paso=0.1, permitir_valor_exacto=True)}
   {bloque_slider('dormitorios', 'Dormitorios', 0, dorm_max_dato)}
   {bloque_slider('banos', 'Baños', 0, banos_max_dato)}
   {bloque_slider('superficie', 'Superficie (m²)', 0, superficie_max_dato, paso=5)}
@@ -3195,7 +3301,7 @@ html_toolbar = f"""
   </div>
   <button type="button" class="vd-reset" id="filtro-reset">Restablecer</button>
   <button type="button" class="vd-reset" id="descargar-eliminadas"
-          title="Descarga las URLs marcadas con 'Eliminar esta casa' como exclusiones_manuales.txt -- guárdalo en la raíz del proyecto para que el próximo análisis las excluya">
+          title="Descarga las URLs marcadas con 'Eliminar esta propiedad' como exclusiones_manuales.txt -- guárdalo en la raíz del proyecto para que el próximo análisis las excluya">
     🗑 Exportar eliminadas (<span id="contador-eliminadas">0</span>)
   </button>
   <div class="vd-group" data-grupo="favoritos">
@@ -3204,7 +3310,7 @@ html_toolbar = f"""
       <span class="vd-group__value" id="resumen-favoritos">0</span>
     </button>
     <div class="vd-panel vd-panel-derecha vd-panel-favoritos">
-      <p class="vd-favoritos-vacio" id="favoritos-vacio">Sin casas favoritas todavía.</p>
+      <p class="vd-favoritos-vacio" id="favoritos-vacio">Sin propiedades favoritas todavía.</p>
       <ul class="vd-favoritos-lista" id="favoritos-lista"></ul>
     </div>
   </div>
@@ -3225,6 +3331,17 @@ var monedaActual = 'CLP';
 // Solo para el texto del slider de precio (control agregado) -- los popups convierten cada uno
 // con su propia tasa (ver `tasa_uf` en Python), no con este valor de referencia.
 var VALOR_UF_REFERENCIA = {VALOR_UF_REFERENCIA};
+// Categoría activa: las cuatro (casa/depto x venta/arriendo) viven en el mismo `datosCasasMapa`
+// (ver PASO 5i extra 3 en Python) pero NUNCA se muestran mezcladas -- aplicarFiltrosMapaCompleto
+// exige d.categoria === categoriaActual antes de cualquier otro filtro. Cada categoría trae su
+// propio rango de precio/dormitorios/baños/superficie (limitesPorCategoria) porque las escalas no
+// son comparables entre, por ejemplo, un arriendo mensual y una venta.
+var categoriaActual = '{CATEGORIA_INICIAL}';
+var limitesPorCategoria = {json.dumps(limites_por_categoria)};
+// Favoritos (ver toggleFavorito) puede acumular propiedades de categorías distintas -- el usuario
+// las guarda, después cambia de pestaña y sigue viéndolas en el panel -- así que esa lista necesita
+// rotular la categoría de cada una explícitamente en vez de asumir la actual.
+var ETIQUETAS_CATEGORIA_JS = {json.dumps(ETIQUETA_CATEGORIA)};
 
 datosCasasMapa.forEach(function(d) {{
     var m = L.circleMarker([d.lat, d.lon], {{
@@ -3256,8 +3373,15 @@ function aplicarFiltrosMapaCompleto() {{
             if ({nombre_js_mapa}.hasLayer(m)) {{ {nombre_js_mapa}.removeLayer(m); }}
             return;
         }}
-        totalActivas++;
         var d = m._datos;
+        // La categoría manda primero y no cuenta para "totalActivas": mezclarla en el mismo
+        // conteo que precio/dormitorios/etc. haría que el contador mostrara "50 de 9000" en vez
+        // de "50 de 1350" -- confuso cuando cada categoría tiene un universo de tamaño distinto.
+        if (d.categoria !== categoriaActual) {{
+            if ({nombre_js_mapa}.hasLayer(m)) {{ {nombre_js_mapa}.removeLayer(m); }}
+            return;
+        }}
+        totalActivas++;
         var visible = d.precio >= precioMin && d.precio <= precioMax &&
                       d.dormitorios >= dormMin && d.dormitorios <= dormMax &&
                       d.banos >= banosMin && d.banos <= banosMax &&
@@ -3270,10 +3394,10 @@ function aplicarFiltrosMapaCompleto() {{
             if ({nombre_js_mapa}.hasLayer(m)) {{ {nombre_js_mapa}.removeLayer(m); }}
         }}
     }});
-    document.getElementById('filtro-contador').innerText = visibles + ' de ' + totalActivas + ' casas';
+    document.getElementById('filtro-contador').innerText = visibles + ' de ' + totalActivas + ' propiedades';
 }}
 
-// Casas marcadas con el botón "Eliminar esta casa" del popup (ver construir_popup en Python) --
+// Propiedades marcadas con el botón "Eliminar esta propiedad" del popup (ver construir_popup en Python) --
 // se ocultan de inmediato y quedan fuera de aplicarFiltrosMapaCompleto para siempre (dentro de
 // esta sesión del navegador). "Exportar eliminadas" descarga sus URLs para que el usuario las
 // pegue en exclusiones_manuales.txt y el próximo `proyecto_casas.py` las excluya del dataset real
@@ -3343,7 +3467,8 @@ function renderizarFavoritos() {{
         li.className = 'vd-favorito-item';
 
         var texto = document.createElement('span');
-        texto.textContent = d.comuna + ' — ' + Math.round(d.precio).toLocaleString('en-US') + ' CLP';
+        texto.textContent = d.comuna + ' (' + ETIQUETAS_CATEGORIA_JS[d.categoria] + ') — ' +
+            Math.round(d.precio).toLocaleString('en-US') + ' CLP';
 
         var enlace = document.createElement('a');
         enlace.href = d.url;
@@ -3454,6 +3579,17 @@ function configurarSliderDual(prefijo, formatearValor) {{
     return {{
         reset: function() {{ elMin.value = limiteMin; elMax.value = limiteMax; actualizar(); }},
         refrescar: actualizar,
+        // Llamado al cambiar de categoría (ver el wiring de .vd-categoria-tab más abajo): un
+        // arriendo mensual y una venta no comparten escala de precio, así que cambiar de categoría
+        // tiene que reemplazar min/max del slider, no solo sus valores actuales -- y arranca en el
+        // rango completo de la categoría nueva (no tiene sentido conservar un filtro de precio en
+        // millones pensado para la categoría anterior).
+        establecerLimites: function(nuevoMin, nuevoMax) {{
+            limiteMin = nuevoMin; limiteMax = nuevoMax;
+            elMin.min = nuevoMin; elMin.max = nuevoMax; elMin.value = nuevoMin;
+            elMax.min = nuevoMin; elMax.max = nuevoMax; elMax.value = nuevoMax;
+            actualizar();
+        }},
     }};
 }}
 
@@ -3526,6 +3662,26 @@ document.getElementById('toggle-moneda').addEventListener('click', function() {{
     }});
 }});
 
+// Cambiar de categoría reescala los cuatro sliders al rango propio de esa categoría (ver
+// limitesPorCategoria/establecerLimites) y vuelve a aplicar filtros -- comuna y moneda no dependen
+// de la categoría, así que esos dos controles quedan como estaban.
+document.querySelectorAll('.vd-categoria-tab').forEach(function(boton) {{
+    boton.addEventListener('click', function() {{
+        if (boton.classList.contains('vd-categoria-activa')) {{ return; }}
+        document.querySelectorAll('.vd-categoria-tab').forEach(function(b) {{ b.classList.remove('vd-categoria-activa'); }});
+        boton.classList.add('vd-categoria-activa');
+        categoriaActual = boton.dataset.categoria;
+
+        var limites = limitesPorCategoria[categoriaActual];
+        sliderPrecio.establecerLimites(limites.precio[0], limites.precio[1]);
+        sliderDormitorios.establecerLimites(limites.dormitorios[0], limites.dormitorios[1]);
+        sliderBanos.establecerLimites(limites.banos[0], limites.banos[1]);
+        sliderSuperficie.establecerLimites(limites.superficie[0], limites.superficie[1]);
+        refrescarCamposExactos();
+        aplicarFiltrosMapaCompleto();
+    }});
+}});
+
 function actualizarResumenComuna() {{
     var todas = document.querySelectorAll('.vd-comuna');
     var marcadas = document.querySelectorAll('.vd-comuna:checked');
@@ -3581,10 +3737,15 @@ mapa_completo.get_root().html.add_child(folium.Element(html_toolbar))
 mapa_completo.get_root().script.add_child(folium.Element(script_filtros))
 
 mapa_completo.save(MAPA_COMPLETO_HTML)
-print(f'{MAPA_COMPLETO_HTML}: {len(mapa_datos_completo)} casas graficadas (train+test) '
-      f'({(mapa_datos_completo["flag"] != "dentro_del_intervalo").sum()} flaggeadas) -- '
-      f'diagnóstico, no tiene garantía de cobertura para las filas de train. '
-      f'Filtros interactivos: precio, comuna, dormitorios/baños/superficie mínimos.')
+resumen_por_categoria = ', '.join(
+    f'{ETIQUETA_CATEGORIA[categoria]}: {len(grupo)}'
+    for categoria, grupo in mapa_datos_completo.groupby('categoria', sort=False)
+)
+print(f'{MAPA_COMPLETO_HTML}: {len(mapa_datos_completo)} propiedades graficadas ({resumen_por_categoria}) '
+      f'-- {(mapa_datos_completo["flag"] != "dentro_del_intervalo").sum()} flaggeadas en total. '
+      f'"Casa en venta" es la única categoría real (train+test, sin garantía de cobertura para '
+      f'train); el resto es sintético (ver generar_datos_sinteticos.py). '
+      f'Filtros interactivos: categoría, precio, comuna, dormitorios/baños/superficie mínimos.')
 
 # =======================================================================================
 # PASO 5j -- LÍMITES: QUÉ NO PUEDE RESPONDER ESTE MODELO
