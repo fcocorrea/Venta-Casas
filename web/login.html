@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Accede a ZoneCheck e ingresa al mapa interactivo de propiedades de toda la Región Metropolitana, con el precio justo estimado para cada una.">
 <title>ZoneCheck — Acceso</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -39,15 +40,73 @@
   @keyframes fade{from{opacity:0;}to{opacity:1;}}
 
   .stage{
-    min-height:100vh;
+    min-height:calc(100vh - 56px);
     display:flex;
+  }
+
+  /* ---------- top nav ---------- */
+  .topnav{
+    height:56px;
+    background:var(--pine-950);
+    border-bottom:1px solid rgba(246,243,234,.14);
+  }
+  .topnav nav{
+    max-width:1280px;
+    margin:0 auto;
+    height:100%;
+    padding:0 clamp(1.25rem, 4vw, 3rem);
+    display:flex;
+    align-items:center;
+    gap:1.5rem;
+  }
+  .topnav__mark{
+    font-family:'Fraunces',serif;
+    font-weight:600;
+    font-size:1.3rem;
+    letter-spacing:-.01em;
+    color:var(--paper-50);
+    text-decoration:none;
+  }
+  .topnav__mark:hover{color:var(--moss-500);}
+  .topnav__links{
+    display:flex;
+    align-items:center;
+    gap:1.5rem;
+    margin-left:2.5rem;
+    padding:0;
+    list-style:none;
+  }
+  .topnav__links a{
+    font-size:.9rem;
+    font-weight:600;
+    color:var(--paper-100);
+    text-decoration:none;
+  }
+  .topnav__links a:hover{color:var(--paper-50); text-decoration:underline;}
+  .topnav__cta{
+    font-size:.88rem;
+    font-weight:700;
+    color:var(--pine-950);
+    background:var(--paper-50);
+    text-decoration:none;
+    padding:.45rem 1rem;
+    border-radius:999px;
+    margin-left:auto;
+  }
+  .topnav__cta:hover{background:var(--moss-500); color:var(--paper-50);}
+  .topnav__cta:focus-visible, .topnav__mark:focus-visible, .topnav__links a:focus-visible{
+    outline:2px solid var(--moss-500);
+    outline-offset:2px;
+  }
+  @media (max-width:640px){
+    .topnav__links{display:none;}
   }
 
   /* ---------- map pane ---------- */
   .map-pane{
     position:relative;
     flex:1 1 60%;
-    min-height:100vh;
+    min-height:100%;
     overflow:hidden;
   }
   .map-pane__img{
@@ -253,14 +312,27 @@
 </style>
 </head>
 <body>
-  <div class="stage">
+  <header class="topnav">
+    <nav aria-label="Navegación principal">
+      <a class="topnav__mark" href="index.html">ZoneCheck</a>
+      <ul class="topnav__links">
+        <li><a href="index.html">Inicio</a></li>
+        <li><a href="index.html#como-funciona">Cómo funciona</a></li>
+        <li><a href="index.html#cobertura">Cobertura</a></li>
+        <li><a href="index.html#precios">Precios</a></li>
+      </ul>
+      <a class="topnav__cta" href="index.html#acceso">Registrarse</a>
+    </nav>
+  </header>
+
+  <main class="stage">
     <section class="map-pane" aria-hidden="true">
       <img class="map-pane__img" src="assets/mapa-fondo.jpg" alt="">
       <div class="map-pane__scrim"></div>
 
       <div class="map-pane__brand">
         <span class="map-pane__mark">ZoneCheck</span>
-        <p class="map-pane__tagline">Tasación algorítmica de propiedades en el Gran Santiago.</p>
+        <p class="map-pane__tagline">El precio justo de cada propiedad de la Región Metropolitana.</p>
       </div>
 
       <div class="map-pane__legend">
@@ -269,9 +341,8 @@
       </div>
 
       <dl class="map-pane__coords">
-        <div><dt>Vitacura</dt><dd>33.3833° S · 70.5667° O</dd></div>
-        <div><dt>Las Condes</dt><dd>33.4089° S · 70.5183° O</dd></div>
-        <div><dt>Lo Barnechea</dt><dd>33.3550° S · 70.5017° O</dd></div>
+        <div><dt>Cobertura</dt><dd>Toda la Región Metropolitana</dd></div>
+        <div><dt>Categorías</dt><dd>Casas y deptos · venta y arriendo</dd></div>
       </dl>
     </section>
 
@@ -279,7 +350,7 @@
       <div class="form-pane__inner">
         <p class="form-pane__eyebrow">Acceso suscriptores</p>
         <h1 class="form-pane__title">Inicia sesión</h1>
-        <p class="form-pane__sub">Visualiza el mapa de precios en Vitacura, Las Condes y Lo Barnechea.</p>
+        <p class="form-pane__sub">Visualiza el mapa de precios de toda la Región Metropolitana.</p>
 
         <form class="login-form" id="login-form" autocomplete="on" novalidate>
           <p class="login-form__error" id="login-error" role="alert">Usuario o contraseña incorrectos.</p>
@@ -297,7 +368,7 @@
         <p class="form-pane__foot">Servicio por suscripción · ¿Problemas para ingresar? <a href="#">Contacta a soporte</a></p>
       </div>
     </section>
-  </div>
+  </main>
 
   <script>
     const DEMO_USER = 'fjcorreaa@gmail.com';
