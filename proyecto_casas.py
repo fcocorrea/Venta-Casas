@@ -3074,63 +3074,89 @@ superficie_max_dato = limites_por_categoria[CATEGORIA_INICIAL]['superficie'][1]
 comunas_disponibles = sorted(mapa_datos_completo['comuna'].dropna().unique().tolist())
 nombre_js_mapa = mapa_completo.get_name()
 
-ALTO_TOOLBAR_PX = 52
+ALTO_TOOLBAR_PX = 56
 
 css_toolbar = """
 <style>
+/* Paleta/tipografía alineadas con web/index.html (paper cream + moss green + ink) -- pero sin
+   cargar la fuente Plus Jakarta Sans desde Google Fonts: este HTML tiene que poder abrirse offline
+   como archivo local (ver nota más abajo), así que se usa el mismo stack de fuentes de sistema de
+   siempre, solo con los mismos colores/formas/radios que el sitio. */
 #toolbar-filtros, #toolbar-filtros * { box-sizing: border-box; }
 #toolbar-filtros {
   position: fixed; top: 0; left: 0; right: 0; z-index: 10000;
-  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
-  min-height: 52px; padding: 6px 16px;
-  background: #ffffff; border-bottom: 1px solid #E5E7EB;
-  box-shadow: 0 1px 3px rgba(15,23,22,0.08);
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  min-height: 56px; padding: 8px 20px;
+  background: rgba(255,255,255,0.94); border-bottom: 1px solid #E6E0CD;
+  backdrop-filter: blur(6px);
+  box-shadow: 0 1px 3px rgba(16,28,22,0.06);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  font-size: 13px; color: #111827;
+  font-size: 13px; color: #24352C;
 }
 .vd-brand {
-  font-weight: 600; font-size: 13px; color: #0F766E;
-  margin-right: 12px; white-space: nowrap; letter-spacing: 0.01em;
+  display: inline-flex; align-items: baseline; gap: 6px; text-decoration: none;
+  font-weight: 800; font-size: 15px; color: #101C16;
+  margin-right: 14px; white-space: nowrap; letter-spacing: -0.01em;
+}
+.vd-brand:hover { color: #2E6E48; }
+.vd-brand__tag {
+  font-weight: 700; font-size: 10.5px; color: #3E8B5D;
+  text-transform: uppercase; letter-spacing: 0.07em;
 }
 .vd-moneda-toggle {
-  background: #0F766E; color: #ffffff; border: 1px solid #0F766E; border-radius: 6px;
-  padding: 6px 14px; margin-right: 10px; font-size: 12px; font-weight: 700;
+  background: transparent; color: #24352C; border: 1px solid #E6E0CD; border-radius: 999px;
+  padding: 7px 14px; margin-right: 8px; font-size: 12px; font-weight: 700;
   font-family: inherit; letter-spacing: 0.02em; cursor: pointer;
-  transition: background 0.15s ease, transform 0.1s ease;
+  transition: border-color 0.15s ease, color 0.15s ease;
 }
-.vd-moneda-toggle:hover { background: #0d5f58; }
+.vd-moneda-toggle:hover { border-color: #3E8B5D; color: #2E6E48; }
 .vd-moneda-toggle:active { transform: scale(0.96); }
 .vd-categoria-tabs {
-  display: flex; flex-wrap: wrap; gap: 4px; margin-right: 14px;
-  padding: 3px; background: #F3F4F6; border-radius: 8px;
+  display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 3px; margin-right: 10px;
+  padding: 3px; background: #EFE8D5; border-radius: 999px; scrollbar-width: none;
 }
+.vd-categoria-tabs::-webkit-scrollbar { display: none; }
 .vd-categoria-tab {
-  border: none; background: transparent; padding: 6px 11px; border-radius: 6px;
-  font-family: inherit; font-size: 12px; font-weight: 600; color: #6B7280;
+  border: none; background: transparent; padding: 7px 13px; border-radius: 999px;
+  font-family: inherit; font-size: 12px; font-weight: 700; color: #4B5048;
   cursor: pointer; white-space: nowrap; transition: background 0.15s ease, color 0.15s ease;
 }
-.vd-categoria-tab:hover { color: #111827; }
-.vd-categoria-tab.vd-categoria-activa { background: #0F766E; color: #ffffff; }
+.vd-categoria-tab:hover { color: #101C16; }
+.vd-categoria-tab.vd-categoria-activa { background: #3E8B5D; color: #ffffff; }
 .vd-group { position: relative; }
 .vd-group__button {
-  display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
-  background: none; border: 1px solid transparent; border-radius: 6px;
-  padding: 5px 12px; cursor: pointer; line-height: 1.25; font-family: inherit;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  display: flex; align-items: center; gap: 7px;
+  background: transparent; border: 1px solid transparent; border-radius: 999px;
+  padding: 7px 14px; cursor: pointer; font-family: inherit;
+  font-size: 12.5px; font-weight: 700; color: #24352C; white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
+.vd-group__button--principal { background: #F7F4EC; border-color: #E6E0CD; margin-right: 8px; }
 .vd-group:hover .vd-group__button, .vd-group.vd-abierto .vd-group__button, .vd-group:focus-within .vd-group__button {
-  background: #F0FDFA; border-color: #99F6E4;
+  background: #E3EFDF; border-color: #B9DCC4; color: #2E6E48;
 }
+.vd-group__icon { font-size: 13px; line-height: 1; }
+.vd-group__button--icono {
+  width: 34px; height: 34px; padding: 0; justify-content: center; border-radius: 50%;
+  font-size: 15px; color: #4B5048; border-color: #E6E0CD; background: #ffffff;
+}
+.vd-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+  background: #E6E0CD; color: #4B5048; font-size: 10.5px; font-weight: 800;
+}
+.vd-badge.vd-group__value--activo { background: #3E8B5D; color: #ffffff; }
+.vd-badge[hidden] { display: none; }
 .vd-group__label {
-  font-size: 10.5px; color: #6B7280; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: 10.5px; color: #848D82; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em;
 }
-.vd-group__value { font-size: 13px; color: #374151; font-weight: 500; }
-.vd-group__value--activo { color: #0F766E; font-weight: 700; }
+.vd-group__value { font-size: 12.5px; color: #4B5048; font-weight: 600; }
+.vd-group__value--activo { color: #2E6E48; font-weight: 800; }
 .vd-panel {
-  position: absolute; top: calc(100% + 6px); left: 0; min-width: 230px;
-  background: #ffffff; border: 1px solid #E5E7EB; border-radius: 10px;
-  box-shadow: 0 10px 28px rgba(15,23,22,0.14);
+  position: absolute; top: calc(100% + 8px); left: 0; min-width: 230px;
+  background: #ffffff; border: 1px solid #E6E0CD; border-radius: 14px;
+  box-shadow: 0 18px 40px -20px rgba(16,28,22,0.35);
   padding: 16px; opacity: 0; visibility: hidden; transform: translateY(-4px);
   transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s;
   z-index: 10001;
@@ -3138,20 +3164,33 @@ css_toolbar = """
 .vd-group:hover .vd-panel, .vd-group.vd-abierto .vd-panel, .vd-group:focus-within .vd-panel {
   opacity: 1; visibility: visible; transform: translateY(0);
 }
+.vd-mega-panel { min-width: 560px; max-width: min(680px, calc(100vw - 24px)); }
+.vd-mega-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 24px; }
+.vd-mega-field__head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 2px; }
+.vd-mega-divider { height: 1px; background: #E6E0CD; margin: 16px 0 12px; }
+.vd-mega-comuna__head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.vd-mega-comuna__label {
+  font-size: 10.5px; color: #848D82; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.vd-checklist--grid {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px 16px;
+  max-height: 190px; overflow-y: auto;
+}
 .vd-valor-exacto { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 .vd-valor-exacto input[type="number"] {
-  width: 76px; border: 1px solid #E5E7EB; border-radius: 6px; padding: 4px 6px;
-  font-size: 12.5px; font-family: inherit; color: #111827;
+  width: 76px; border: 1px solid #E6E0CD; border-radius: 6px; padding: 4px 6px;
+  font-size: 12.5px; font-family: inherit; color: #24352C;
 }
-.vd-valor-exacto input[type="number"]:focus { outline: 2px solid #0F766E; outline-offset: 1px; border-color: #0F766E; }
-.vd-valor-exacto span { color: #9CA3AF; font-size: 12px; }
+.vd-valor-exacto input[type="number"]:focus { outline: 2px solid #3E8B5D; outline-offset: 1px; border-color: #3E8B5D; }
+.vd-valor-exacto span { color: #848D82; font-size: 12px; }
 .vd-slider { position: relative; height: 28px; margin: 10px 2px 2px; }
 .vd-slider__track {
   position: absolute; top: 50%; left: 0; right: 0; height: 4px;
-  background: #E5E7EB; border-radius: 2px; transform: translateY(-50%);
+  background: #E6E0CD; border-radius: 2px; transform: translateY(-50%);
 }
 .vd-slider__fill {
-  position: absolute; top: 50%; height: 4px; background: #0F766E;
+  position: absolute; top: 50%; height: 4px; background: #3E8B5D;
   border-radius: 2px; transform: translateY(-50%);
 }
 .vd-slider input[type="range"] {
@@ -3161,27 +3200,31 @@ css_toolbar = """
 .vd-slider input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none; pointer-events: auto;
   width: 16px; height: 16px; border-radius: 50%; margin-top: 4px;
-  background: #ffffff; border: 2px solid #0F766E; cursor: pointer;
+  background: #ffffff; border: 2px solid #3E8B5D; cursor: pointer;
   box-shadow: 0 1px 3px rgba(0,0,0,0.3);
 }
 .vd-slider input[type="range"]::-moz-range-thumb {
   pointer-events: auto; width: 16px; height: 16px; border-radius: 50%;
-  background: #ffffff; border: 2px solid #0F766E; cursor: pointer;
+  background: #ffffff; border: 2px solid #3E8B5D; cursor: pointer;
   box-shadow: 0 1px 3px rgba(0,0,0,0.3);
 }
 .vd-slider input[type="range"]::-webkit-slider-runnable-track { background: transparent; }
 .vd-slider input[type="range"]::-moz-range-track { background: transparent; }
-.vd-slider input[type="range"]:focus-visible::-webkit-slider-thumb { outline: 2px solid #0F766E; outline-offset: 2px; }
-.vd-slider-values { display: flex; justify-content: space-between; font-size: 12px; color: #374151; margin-top: 2px; }
+.vd-slider input[type="range"]:focus-visible::-webkit-slider-thumb { outline: 2px solid #3E8B5D; outline-offset: 2px; }
+.vd-slider-values { display: flex; justify-content: space-between; font-size: 12px; color: #4B5048; margin-top: 2px; }
 .vd-checklist { display: flex; flex-direction: column; }
-.vd-checklist label { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 13px; cursor: pointer; }
-.vd-reset {
-  margin-left: auto; background: none; border: 1px solid #E5E7EB; border-radius: 6px;
-  padding: 6px 12px; font-size: 12px; color: #6B7280; cursor: pointer; font-family: inherit;
-  transition: border-color 0.15s ease, color 0.15s ease;
+.vd-checklist label { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 13px; cursor: pointer; color: #24352C; }
+.vd-panel-acciones { display: flex; flex-direction: column; gap: 2px; min-width: 230px; padding: 8px; }
+.vd-accion {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  background: none; border: none; border-radius: 8px; padding: 9px 10px;
+  font-size: 12.5px; font-weight: 600; color: #24352C; cursor: pointer; font-family: inherit;
 }
-.vd-reset:hover { border-color: #0F766E; color: #0F766E; }
-.vd-counter { font-size: 12px; color: #6B7280; white-space: nowrap; margin-left: 12px; }
+.vd-accion:hover { background: #F7F4EC; }
+.vd-counter {
+  font-size: 11.5px; color: #848D82; font-weight: 700; white-space: nowrap;
+  margin-left: auto; padding: 7px 12px; background: #F7F4EC; border-radius: 999px;
+}
 .vd-popup-wrap { position: relative; padding-bottom: 32px; }
 .vd-popup-iconos { position: absolute; bottom: 0; right: 0; display: flex; gap: 6px; }
 .vd-popup-favorito, .vd-popup-trash {
@@ -3193,13 +3236,13 @@ css_toolbar = """
 .vd-popup-favorito { background: #FFFBEB; border-color: #FDE68A; color: #B45309; }
 .vd-popup-favorito:hover { background: #FEF3C7; transform: scale(1.08); }
 .vd-popup-favorito.vd-favorito-activo { background: #FDE68A; color: #92400E; }
-.vd-popup-trash { background: #FEF2F2; border-color: #FECACA; color: #B91C1C; }
-.vd-popup-trash:hover { background: #FEE2E2; transform: scale(1.08); }
+.vd-popup-trash { background: #F6E2DC; border-color: #E4B6A8; color: #C24B3B; }
+.vd-popup-trash:hover { background: #F1D2C8; transform: scale(1.08); }
 .vd-popup-confirm {
   display: none; position: absolute; bottom: 0; left: 0; right: 0;
   align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px;
-  background: #FFFBEB; border: 1px solid #FDE68A; border-radius: 6px;
-  padding: 5px 8px; font-size: 11.5px; color: #92400E;
+  background: #F6E2DC; border: 1px solid #E4B6A8; border-radius: 6px;
+  padding: 5px 8px; font-size: 11.5px; color: #8A3527;
 }
 .vd-popup-wrap.vd-confirmando .vd-popup-iconos { display: none; }
 .vd-popup-wrap.vd-confirmando .vd-popup-confirm { display: flex; }
@@ -3207,28 +3250,32 @@ css_toolbar = """
   border: none; border-radius: 4px; padding: 3px 8px; font-size: 11px;
   cursor: pointer; font-family: inherit;
 }
-.vd-confirm-si { background: #B91C1C; color: #ffffff; }
-.vd-confirm-si:hover { background: #991B1B; }
-.vd-confirm-no { background: #E5E7EB; color: #374151; }
-.vd-confirm-no:hover { background: #D1D5DB; }
+.vd-confirm-si { background: #C24B3B; color: #ffffff; }
+.vd-confirm-si:hover { background: #A83C2E; }
+.vd-confirm-no { background: #E6E0CD; color: #24352C; }
+.vd-confirm-no:hover { background: #DAD2B8; }
 .vd-panel-derecha { left: auto; right: 0; }
 .vd-panel-favoritos { min-width: 260px; max-width: 320px; max-height: 260px; overflow-y: auto; }
-.vd-favoritos-vacio { margin: 0; font-size: 12.5px; color: #6B7280; }
+.vd-favoritos-vacio { margin: 0; font-size: 12.5px; color: #848D82; }
 .vd-favoritos-lista { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .vd-favorito-item {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  font-size: 12.5px; padding: 4px 0; border-bottom: 1px solid #F3F4F6;
+  font-size: 12.5px; padding: 4px 0; border-bottom: 1px solid #F7F4EC;
 }
-.vd-favorito-item span { flex: 1; color: #374151; }
-.vd-favorito-item a { color: #0F766E; font-size: 12px; white-space: nowrap; }
+.vd-favorito-item span { flex: 1; color: #24352C; }
+.vd-favorito-item a { color: #2E6E48; font-size: 12px; white-space: nowrap; }
 .vd-favorito-quitar {
-  border: none; background: none; color: #9CA3AF; cursor: pointer; font-size: 13px;
+  border: none; background: none; color: #848D82; cursor: pointer; font-size: 13px;
   padding: 0 2px; line-height: 1;
 }
-.vd-favorito-quitar:hover { color: #B91C1C; }
+.vd-favorito-quitar:hover { color: #C24B3B; }
 @media (max-width: 760px) {
   #toolbar-filtros { padding: 8px 10px; }
+  .vd-brand__tag { display: none; }
   .vd-counter { margin-left: 0; width: 100%; order: 99; }
+  .vd-mega-panel { min-width: 0; }
+  .vd-mega-grid { grid-template-columns: 1fr; }
+  .vd-checklist--grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 </style>
 """
@@ -3241,8 +3288,11 @@ checkboxes_comuna_html = ''.join(
 
 def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, paso: float = 1,
                    permitir_valor_exacto: bool = False) -> str:
-    # `permitir_valor_exacto` agrega dos <input type="number"> arriba del slider -- alternativa
-    # para escribir el monto exacto en vez de arrastrar. Por ahora solo Precio lo pide.
+    # Los cuatro sliders (precio/dormitorios/baños/superficie) viven como campos inline dentro del
+    # mega-panel del grupo "Filtros" (ver html_toolbar) en vez de tener cada uno su propio botón +
+    # panel flotante -- eso era lo que hacía que el toolbar se sintiera como una fila interminable
+    # de botones. `permitir_valor_exacto` agrega dos <input type="number"> arriba del slider --
+    # alternativa para escribir el monto exacto en vez de arrastrar. Por ahora solo Precio lo pide.
     campos_exactos = ''
     if permitir_valor_exacto:
         campos_exactos = f"""
@@ -3252,22 +3302,20 @@ def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, p
         <input type="number" id="exacto-{prefijo}-max" aria-label="Valor máximo exacto" placeholder="Hasta">
       </div>"""
     return f"""
-  <div class="vd-group" data-grupo="{prefijo}">
-    <button type="button" class="vd-group__button">
+  <div class="vd-mega-field" data-grupo="{prefijo}">
+    <div class="vd-mega-field__head">
       <span class="vd-group__label" id="etiqueta-{prefijo}">{etiqueta}</span>
       <span class="vd-group__value" id="resumen-{prefijo}">Todos</span>
-    </button>
-    <div class="vd-panel">{campos_exactos}
-      <div class="vd-slider">
-        <div class="vd-slider__track"></div>
-        <div class="vd-slider__fill" id="relleno-{prefijo}"></div>
-        <input type="range" id="rango-{prefijo}-min" min="{valor_min}" max="{valor_max}" value="{valor_min}" step="{paso}">
-        <input type="range" id="rango-{prefijo}-max" min="{valor_min}" max="{valor_max}" value="{valor_max}" step="{paso}">
-      </div>
-      <div class="vd-slider-values">
-        <span id="texto-{prefijo}-min"></span>
-        <span id="texto-{prefijo}-max"></span>
-      </div>
+    </div>{campos_exactos}
+    <div class="vd-slider">
+      <div class="vd-slider__track"></div>
+      <div class="vd-slider__fill" id="relleno-{prefijo}"></div>
+      <input type="range" id="rango-{prefijo}-min" min="{valor_min}" max="{valor_max}" value="{valor_min}" step="{paso}">
+      <input type="range" id="rango-{prefijo}-max" min="{valor_min}" max="{valor_max}" value="{valor_max}" step="{paso}">
+    </div>
+    <div class="vd-slider-values">
+      <span id="texto-{prefijo}-min"></span>
+      <span id="texto-{prefijo}-max"></span>
     </div>
   </div>
 """
@@ -3281,39 +3329,63 @@ categoria_tabs_html = ''.join(
 
 html_toolbar = f"""
 <div id="toolbar-filtros">
-  <span class="vd-brand">ZoneCheck — filtros</span>
+  <a class="vd-brand" href="index.html"><span>ZoneCheck</span><span class="vd-brand__tag">Mapa</span></a>
   <div class="vd-categoria-tabs" role="tablist" aria-label="Categoría de propiedad">
     {categoria_tabs_html}
   </div>
   <button type="button" class="vd-moneda-toggle" id="toggle-moneda" title="Cambiar precios entre CLP y UF">UF</button>
-  {bloque_slider('precio', 'Precio (M CLP)', precio_min_millones, precio_max_millones, paso=0.1, permitir_valor_exacto=True)}
-  {bloque_slider('dormitorios', 'Dormitorios', 0, dorm_max_dato)}
-  {bloque_slider('banos', 'Baños', 0, banos_max_dato)}
-  {bloque_slider('superficie', 'Superficie (m²)', 0, superficie_max_dato, paso=5)}
-  <div class="vd-group" data-grupo="comuna">
-    <button type="button" class="vd-group__button">
-      <span class="vd-group__label">Comuna</span>
-      <span class="vd-group__value" id="resumen-comuna">Todas</span>
+
+  <div class="vd-group" data-grupo="filtros">
+    <button type="button" class="vd-group__button vd-group__button--principal" aria-label="Filtros">
+      <span class="vd-group__icon">⚙</span>
+      <span class="vd-group__label">Filtros</span>
+      <span class="vd-badge" id="badge-filtros" hidden>0</span>
     </button>
-    <div class="vd-panel vd-checklist">
-      {checkboxes_comuna_html}
+    <div class="vd-panel vd-mega-panel">
+      <div id="panel-filtros-contenido">
+        <div class="vd-mega-grid">
+          {bloque_slider('precio', 'Precio (M CLP)', precio_min_millones, precio_max_millones, paso=0.1, permitir_valor_exacto=True)}
+          {bloque_slider('dormitorios', 'Dormitorios', 0, dorm_max_dato)}
+          {bloque_slider('banos', 'Baños', 0, banos_max_dato)}
+          {bloque_slider('superficie', 'Superficie (m²)', 0, superficie_max_dato, paso=5)}
+        </div>
+        <div class="vd-mega-divider"></div>
+        <div class="vd-mega-comuna">
+          <div class="vd-mega-comuna__head">
+            <span class="vd-mega-comuna__label">Comuna</span>
+            <span class="vd-group__value" id="resumen-comuna">Todas</span>
+          </div>
+          <div class="vd-checklist vd-checklist--grid">
+            {checkboxes_comuna_html}
+          </div>
+        </div>
+      </div>
     </div>
   </div>
-  <button type="button" class="vd-reset" id="filtro-reset">Restablecer</button>
-  <button type="button" class="vd-reset" id="descargar-eliminadas"
-          title="Descarga las URLs marcadas con 'Eliminar esta propiedad' como exclusiones_manuales.txt -- guárdalo en la raíz del proyecto para que el próximo análisis las excluya">
-    🗑 Exportar eliminadas (<span id="contador-eliminadas">0</span>)
-  </button>
+
   <div class="vd-group" data-grupo="favoritos">
-    <button type="button" class="vd-group__button">
-      <span class="vd-group__label">★ Favoritos</span>
-      <span class="vd-group__value" id="resumen-favoritos">0</span>
+    <button type="button" class="vd-group__button" aria-label="Favoritos">
+      <span class="vd-group__icon">★</span>
+      <span class="vd-group__label">Favoritos</span>
+      <span class="vd-badge" id="resumen-favoritos">0</span>
     </button>
     <div class="vd-panel vd-panel-derecha vd-panel-favoritos">
       <p class="vd-favoritos-vacio" id="favoritos-vacio">Sin propiedades favoritas todavía.</p>
       <ul class="vd-favoritos-lista" id="favoritos-lista"></ul>
     </div>
   </div>
+
+  <div class="vd-group" data-grupo="mas">
+    <button type="button" class="vd-group__button vd-group__button--icono" aria-label="Más acciones" title="Más acciones">⋯</button>
+    <div class="vd-panel vd-panel-derecha vd-panel-acciones">
+      <button type="button" class="vd-accion" id="filtro-reset">↺ Restablecer filtros</button>
+      <button type="button" class="vd-accion" id="descargar-eliminadas"
+              title="Descarga las URLs marcadas con 'Eliminar esta propiedad' como exclusiones_manuales.txt -- guárdalo en la raíz del proyecto para que el próximo análisis las excluya">
+        🗑 Exportar eliminadas (<span id="contador-eliminadas">0</span>)
+      </button>
+    </div>
+  </div>
+
   <span class="vd-counter" id="filtro-contador"></span>
 </div>
 """
@@ -3352,6 +3424,30 @@ datosCasasMapa.forEach(function(d) {{
     m.addTo({nombre_js_mapa});
     marcadoresMapa.push(m);
 }});
+
+// `radius` en L.circleMarker es en píxeles de pantalla, no en metros -- un círculo puntual no
+// "crece" al alejar el zoom, pero como cientos de círculos vecinos mantienen el mismo radio en
+// píxeles mientras el zoom aleja sus posiciones geográficas mucho menos que su tamaño en pantalla,
+// terminan solapándose en manchas grandes que SÍ se leen como "los puntos crecieron". La solución
+// es reducir el radio a medida que se aleja el zoom (y no tocarlo al acercar más de lo normal, para
+// no alterar la vista con la que se afinó RADIO_MINIMO/RADIO_MAXIMO en Python -- ver zoom_start=12).
+var ZOOM_REFERENCIA_RADIO = 12;
+var ZOOM_MINIMO_RADIO = 8;
+var FACTOR_RADIO_MINIMO = 0.35;
+
+function factorRadioPorZoom(zoom) {{
+    if (zoom >= ZOOM_REFERENCIA_RADIO) {{ return 1; }}
+    if (zoom <= ZOOM_MINIMO_RADIO) {{ return FACTOR_RADIO_MINIMO; }}
+    var t = (zoom - ZOOM_MINIMO_RADIO) / (ZOOM_REFERENCIA_RADIO - ZOOM_MINIMO_RADIO);
+    return FACTOR_RADIO_MINIMO + t * (1 - FACTOR_RADIO_MINIMO);
+}}
+
+function actualizarRadiosPorZoom() {{
+    var factor = factorRadioPorZoom({nombre_js_mapa}.getZoom());
+    marcadoresMapa.forEach(function(m) {{ m.setRadius(Math.max(1, m._datos.radio * factor)); }});
+}}
+{nombre_js_mapa}.on('zoomend', actualizarRadiosPorZoom);
+actualizarRadiosPorZoom();
 
 function aplicarFiltrosMapaCompleto() {{
     var precioMin = parseFloat(document.getElementById('rango-precio-min').value) * 1e6;
@@ -3543,6 +3639,17 @@ document.getElementById('descargar-eliminadas').addEventListener('click', functi
     URL.revokeObjectURL(enlace.href);
 }});
 
+// El botón "Filtros" agrupa precio/dormitorios/baños/superficie/comuna en un solo mega-panel (ver
+// html_toolbar) -- el badge numérico es lo único que le queda al usuario para saber, sin abrirlo,
+// si tiene algún filtro activo ahí dentro. Cuenta los mismos spans `.vd-group__value--activo` que
+// cada sub-filtro ya prende/apaga por su cuenta, así que no necesita su propio estado.
+function actualizarBadgeFiltros() {{
+    var activos = document.querySelectorAll('#panel-filtros-contenido .vd-group__value--activo').length;
+    var badge = document.getElementById('badge-filtros');
+    badge.innerText = activos;
+    badge.hidden = activos === 0;
+}}
+
 function configurarSliderDual(prefijo, formatearValor) {{
     var elMin = document.getElementById('rango-' + prefijo + '-min');
     var elMax = document.getElementById('rango-' + prefijo + '-max');
@@ -3563,6 +3670,7 @@ function configurarSliderDual(prefijo, formatearValor) {{
         var esDefault = vMin <= limiteMin && vMax >= limiteMax;
         resumen.innerText = esDefault ? 'Todos' : (formatearValor(vMin) + ' – ' + formatearValor(vMax));
         resumen.classList.toggle('vd-group__value--activo', !esDefault);
+        actualizarBadgeFiltros();
         aplicarFiltrosMapaCompleto();
     }}
 
@@ -3692,6 +3800,7 @@ function actualizarResumenComuna() {{
         resumen.innerText = marcadas.length + ' de ' + todas.length;
         resumen.classList.add('vd-group__value--activo');
     }}
+    actualizarBadgeFiltros();
     aplicarFiltrosMapaCompleto();
 }}
 document.querySelectorAll('.vd-comuna').forEach(function(el) {{ el.addEventListener('change', actualizarResumenComuna); }});

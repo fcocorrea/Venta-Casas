@@ -211,6 +211,68 @@
   }
   .step__body{margin:0; font-size:.94rem; line-height:1.6; color:var(--graphite-600);}
 
+  /* ---------- legend table ---------- */
+  .legend{
+    margin-top:1.4rem;
+    background:var(--paper-0);
+    border:1px solid var(--line-200);
+    border-radius:16px;
+    box-shadow:0 10px 24px -16px rgba(16,28,22,.25);
+    overflow:hidden;
+  }
+  .legend__table{width:100%; border-collapse:collapse;}
+  .legend__table caption{
+    text-align:left;
+    padding:1.3rem 1.6rem .3rem;
+    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+    font-weight:700;
+    font-size:1.05rem;
+    color:var(--ink-900);
+  }
+  .legend__table th{
+    text-align:left;
+    padding:.6rem 1.6rem 1rem;
+    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+    font-size:.7rem;
+    font-weight:700;
+    letter-spacing:.08em;
+    text-transform:uppercase;
+    color:var(--graphite-400);
+    border-bottom:1px solid var(--line-200);
+  }
+  .legend__table td{
+    padding:1.2rem 1.6rem;
+    border-bottom:1px solid var(--line-200);
+    font-size:.94rem;
+    line-height:1.6;
+    color:var(--graphite-600);
+    vertical-align:middle;
+  }
+  .legend__table tr:last-child td{border-bottom:none;}
+  .legend__sample{width:1%; white-space:nowrap;}
+  .legend__sample__inner{display:inline-flex; align-items:center; gap:.5rem;}
+  .legend__sample--size .legend__sample__inner{align-items:flex-end;}
+  .legend__name{
+    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+    font-weight:700;
+    color:var(--ink-900);
+    white-space:nowrap;
+  }
+  .legend__word--green{color:var(--moss-600); font-weight:700;}
+  .legend__word--red{color:var(--clay-500); font-weight:700;}
+  .legend__dot{
+    display:inline-block;
+    border-radius:50%;
+    box-shadow:0 4px 10px -3px rgba(16,28,22,.4), inset 0 2px 3px rgba(255,255,255,.35), inset 0 -2px 3px rgba(0,0,0,.2);
+  }
+  .legend__dot--green{width:1.3rem; height:1.3rem; background:var(--moss-500);}
+  .legend__dot--red{width:1.3rem; height:1.3rem; background:var(--clay-500);}
+  .legend__dot--xs{width:.6rem; height:.6rem; background:var(--ink-700);}
+  .legend__dot--sm{width:1rem; height:1rem; background:var(--ink-700);}
+  .legend__dot--lg{width:1.5rem; height:1.5rem; background:var(--ink-700);}
+  .legend__dot--solido{width:1.3rem; height:1.3rem; background:var(--ink-900);}
+  .legend__dot--tenue{width:1.3rem; height:1.3rem; background:var(--ink-900); opacity:.25; box-shadow:none;}
+
   /* ---------- proof / feature ---------- */
   .proof{
     display:grid;
@@ -484,6 +546,13 @@
     .step{flex-direction:column; align-items:flex-start;}
     .plans{grid-template-columns:1fr;}
     .nav__login, .nav__links{display:none;}
+    .legend__table thead{display:none;}
+    .legend__table, .legend__table tbody, .legend__table tr, .legend__table td{display:block; width:auto;}
+    .legend__table tr{padding:1.2rem 1.6rem; border-bottom:1px solid var(--line-200);}
+    .legend__table tr:last-child{border-bottom:none;}
+    .legend__table td{padding:.2rem 0; border-bottom:none;}
+    .legend__sample{margin-bottom:.6rem;}
+    .legend__name{margin-bottom:.3rem;}
   }
 </style>
 </head>
@@ -505,7 +574,7 @@
   <header class="hero">
     <div class="reveal">
       <p class="eyebrow hero__eyebrow">Para toda la Región Metropolitana</p>
-      <h1 class="hero__title">Encuentra tu hogar de una manera más fácil y entretenida.</h1>
+      <h1 class="hero__title">Encuentra tu hogar de una manera más fácil, rápida y entretenida.</h1>
       <p class="hero__sub">ZoneCheck te ayuda a encontrar la propiedad perfecta en menos tiempo y a un mejor precio.</p>
     </div>
     <div class="hero__frame reveal">
@@ -540,6 +609,52 @@
             <p class="step__body">Cualquier punto te muestra su precio, el precio justo estimado y sus detalles. Filtra por comuna, precio o superficie y guarda tus favoritas.</p>
           </div>
         </div>
+      </div>
+
+      <div class="legend">
+        <table class="legend__table">
+          <caption>Los tres detalles que hay que mirar en cada punto</caption>
+          <thead>
+            <tr>
+              <th scope="col">Así se ve</th>
+              <th scope="col">Variable</th>
+              <th scope="col">Qué significa</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="legend__sample">
+                <span class="legend__sample__inner">
+                  <span class="legend__dot legend__dot--green" aria-hidden="true"></span>
+                  <span class="legend__dot legend__dot--red" aria-hidden="true"></span>
+                </span>
+              </td>
+              <td class="legend__name">Color</td>
+              <td>Te dice si conviene o no. <span class="legend__word--green">Verde</span> es más barata de lo que debería — una oportunidad. <span class="legend__word--red">Rojo</span> es más cara de lo que debería — un sobreprecio.</td>
+            </tr>
+            <tr>
+              <td class="legend__sample legend__sample--size">
+                <span class="legend__sample__inner">
+                  <span class="legend__dot legend__dot--xs" aria-hidden="true"></span>
+                  <span class="legend__dot legend__dot--sm" aria-hidden="true"></span>
+                  <span class="legend__dot legend__dot--lg" aria-hidden="true"></span>
+                </span>
+              </td>
+              <td class="legend__name">Tamaño</td>
+              <td>Te dice cuánto. Mientras más grande el punto, más se aleja del precio justo — para bien si es verde, para mal si es rojo.</td>
+            </tr>
+            <tr>
+              <td class="legend__sample">
+                <span class="legend__sample__inner">
+                  <span class="legend__dot legend__dot--solido" aria-hidden="true"></span>
+                  <span class="legend__dot legend__dot--tenue" aria-hidden="true"></span>
+                </span>
+              </td>
+              <td class="legend__name">Transparencia</td>
+              <td>Te dice si vale la pena mirarla. Los puntos sólidos son los casos que realmente destacan, para bien o para mal. Los tenues están dentro de lo normal para su sector y se muestran solo como referencia.</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </section>
