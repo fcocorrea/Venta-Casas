@@ -2982,14 +2982,21 @@ def construir_popup(fila: pd.Series, moneda: str, posicion: int) -> str:
     Filas sintéticas (ver PASO 5i extra 3) llevan una franja aparte marcándolas como demo y no
     ofrecen "Ver aviso" -- su url no apunta a ninguna publicación real, mostrarla como link normal
     engañaría al usuario."""
+    decimales = 2 if moneda == 'UF' else 0
     if moneda == 'UF':
         tasa = fila['tasa_uf']
         precio_real, q50, q05, q95 = (fila['precio_real'] / tasa, fila['q50'] / tasa,
                                        fila['q05'] / tasa, fila['q95'] / tasa)
-        formato = '{:,.2f}'
     else:
         precio_real, q50, q05, q95 = fila['precio_real'], fila['q50'], fila['q05'], fila['q95']
-        formato = '{:,.0f}'
+
+    def fmt(valor: float) -> str:
+        """Formato es-CL: punto como separador de miles, coma como decimal -- inverso al
+        separador por defecto de Python ({:,.Nf} usa coma de miles y punto decimal)."""
+        entero, _, decimal = f'{valor:,.{decimales}f}'.partition('.')
+        entero = entero.replace(',', '.')
+        return f'{entero},{decimal}' if decimales else entero
+
     aviso_html = (f"<a href='{fila['url']}' target='_blank'>Ver aviso</a>" if not fila['es_sintetico']
                   else "<span style='color:#9CA3AF;'>Dato de demostración (sin aviso real)</span>")
     badge_sintetico = ("<div style='color:#B45309;font-size:11px;margin-bottom:4px;'>"
@@ -2997,10 +3004,10 @@ def construir_popup(fila: pd.Series, moneda: str, posicion: int) -> str:
     return (f"<div class='vd-popup-wrap' data-idx='{posicion}'>"
             f"{badge_sintetico}"
             f"<b>{fila['comuna']}</b> — {ETIQUETA_CATEGORIA[fila['categoria']]}<br>"
-            f"Precio real: {formato.format(precio_real)} {moneda}<br>"
-            f"Predicho (q50): {formato.format(q50)} {moneda}<br>"
-            f"Intervalo 90%: [{formato.format(q05)}, {formato.format(q95)}] {moneda}<br>"
-            f"Residuo: {fila['residuo_pct']:+.1f}%<br>"
+            f"Precio real: {fmt(precio_real)} {moneda}<br>"
+            f"Predicho: {fmt(q50)} {moneda}<br>"
+            f"Intervalo 90%: {fmt(q05)} - {fmt(q95)} {moneda}<br>"
+            f"Diferencia real/predicho: {fila['residuo_pct']:+.1f}%<br>"
             f"Dormitorios: {fila['Dormitorios']:.0f} | Baños: {fila['Baños']:.0f} | "
             f"Superficie total: {fila['Superficie total']:.0f} m²<br>"
             f"{aviso_html}"
@@ -3255,6 +3262,20 @@ css_toolbar = """
 .vd-confirm-no { background: #E6E0CD; color: #24352C; }
 .vd-confirm-no:hover { background: #DAD2B8; }
 .vd-panel-derecha { left: auto; right: 0; }
+.vd-panel-leyenda { min-width: 260px; max-width: 300px; padding: 14px 16px; }
+.vd-leyenda-titulo { font-size: 12px; font-weight: 800; color: #24352C; margin: 0 0 12px; }
+.vd-leyenda-bloque { margin-bottom: 14px; }
+.vd-leyenda-bloque:last-of-type { margin-bottom: 0; }
+.vd-leyenda-etiqueta {
+  font-size: 10.5px; color: #848D82; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;
+}
+.vd-leyenda-fila { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 12.5px; color: #24352C; }
+.vd-leyenda-circulo { flex: none; border-radius: 50%; }
+.vd-leyenda-nota {
+  margin: 12px 0 0; padding-top: 10px; border-top: 1px solid #E6E0CD;
+  font-size: 11.5px; color: #848D82; line-height: 1.4;
+}
 .vd-panel-favoritos { min-width: 260px; max-width: 320px; max-height: 260px; overflow-y: auto; }
 .vd-favoritos-vacio { margin: 0; font-size: 12.5px; color: #848D82; }
 .vd-favoritos-lista { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -3360,6 +3381,54 @@ html_toolbar = f"""
           </div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div class="vd-group" data-grupo="leyenda">
+    <button type="button" class="vd-group__button vd-group__button--icono" aria-label="Cómo leer el mapa" title="Cómo leer el mapa">◐</button>
+    <div class="vd-panel vd-panel-leyenda">
+      <p class="vd-leyenda-titulo">Cómo leer los círculos</p>
+
+      <div class="vd-leyenda-bloque">
+        <p class="vd-leyenda-etiqueta">Color: hacia dónde se desvía</p>
+        <div class="vd-leyenda-fila">
+          <span class="vd-leyenda-circulo" style="width:16px;height:16px;background:green;opacity:0.55;"></span>
+          <span>Más barata de lo esperado (posible oportunidad)</span>
+        </div>
+        <div class="vd-leyenda-fila">
+          <span class="vd-leyenda-circulo" style="width:16px;height:16px;background:red;opacity:0.55;"></span>
+          <span>Más cara de lo esperado (posible sobreprecio)</span>
+        </div>
+      </div>
+
+      <div class="vd-leyenda-bloque">
+        <p class="vd-leyenda-etiqueta">Marcado vs. pálido: si vale la pena mirarla</p>
+        <div class="vd-leyenda-fila">
+          <span class="vd-leyenda-circulo" style="width:16px;height:16px;background:#3E8B5D;opacity:0.2;"></span>
+          <span>Precio normal para casas parecidas -- nada raro</span>
+        </div>
+        <div class="vd-leyenda-fila">
+          <span class="vd-leyenda-circulo" style="width:16px;height:16px;background:#3E8B5D;opacity:0.55;"></span>
+          <span>Precio fuera de lo normal -- candidata a revisar</span>
+        </div>
+      </div>
+
+      <div class="vd-leyenda-bloque">
+        <p class="vd-leyenda-etiqueta">Tamaño: qué tan lejos está del precio esperado</p>
+        <div class="vd-leyenda-fila">
+          <span class="vd-leyenda-circulo" style="width:10px;height:10px;background:#3E8B5D;opacity:0.55;"></span>
+          <span>Se aleja poco de lo esperado</span>
+        </div>
+        <div class="vd-leyenda-fila">
+          <span class="vd-leyenda-circulo" style="width:26px;height:26px;background:#3E8B5D;opacity:0.55;"></span>
+          <span>Se aleja mucho de lo esperado</span>
+        </div>
+      </div>
+
+      <p class="vd-leyenda-nota">
+        Revisa primero los círculos marcados (no pálidos): esos son los que se salen de lo normal.
+        Entre esos, los más grandes son los que se alejan más del precio esperado.
+      </p>
     </div>
   </div>
 

@@ -118,7 +118,6 @@
     align-self:center;
     padding:clamp(3rem, 7vw, 5.5rem) clamp(1.5rem, 4vw, 4rem);
   }
-  .hero__eyebrow{color:var(--moss-600); margin:0 0 1rem;}
   .hero__title{
     margin:0 0 1.2rem;
     font-family:'Plus Jakarta Sans',system-ui,sans-serif;
@@ -174,42 +173,6 @@
     line-height:1.6;
     color:var(--graphite-600);
   }
-
-  /* ---------- steps ---------- */
-  .steps{
-    display:flex;
-    flex-direction:column;
-    gap:1.4rem;
-  }
-  .step{
-    display:flex;
-    align-items:center;
-    gap:1.4rem;
-    padding:1.4rem 1.6rem;
-    border:1px solid var(--line-200);
-    border-radius:14px;
-    background:var(--paper-0);
-    box-shadow:0 10px 24px -16px rgba(16,28,22,.25);
-  }
-  .step__dot{
-    flex:0 0 auto;
-    width:2.4rem;
-    height:2.4rem;
-    border-radius:50%;
-    box-shadow:0 8px 18px -4px rgba(16,28,22,.45), inset 0 3px 5px rgba(255,255,255,.35), inset 0 -3px 6px rgba(0,0,0,.2);
-  }
-  .step__dot--green{background:var(--moss-500);}
-  .step__dot--red{background:var(--clay-500);}
-  .step__dot--ink{background:var(--ink-900);}
-  .step__content{flex:1;}
-  .step__title{
-    margin:0 0 .5rem;
-    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
-    font-weight:700;
-    font-size:1.2rem;
-    color:var(--ink-900);
-  }
-  .step__body{margin:0; font-size:.94rem; line-height:1.6; color:var(--graphite-600);}
 
   /* ---------- legend table ---------- */
   .legend{
@@ -267,11 +230,11 @@
   }
   .legend__dot--green{width:1.3rem; height:1.3rem; background:var(--moss-500);}
   .legend__dot--red{width:1.3rem; height:1.3rem; background:var(--clay-500);}
-  .legend__dot--xs{width:.6rem; height:.6rem; background:var(--ink-700);}
-  .legend__dot--sm{width:1rem; height:1rem; background:var(--ink-700);}
-  .legend__dot--lg{width:1.5rem; height:1.5rem; background:var(--ink-700);}
-  .legend__dot--solido{width:1.3rem; height:1.3rem; background:var(--ink-900);}
-  .legend__dot--tenue{width:1.3rem; height:1.3rem; background:var(--ink-900); opacity:.25; box-shadow:none;}
+  .legend__dot--xs{width:.6rem; height:.6rem; background:var(--moss-500);}
+  .legend__dot--sm{width:1rem; height:1rem; background:var(--moss-500);}
+  .legend__dot--lg{width:1.5rem; height:1.5rem; background:var(--moss-500);}
+  .legend__dot--solido{width:1.3rem; height:1.3rem; background:var(--moss-500);}
+  .legend__dot--tenue{width:1.3rem; height:1.3rem; background:var(--moss-500); opacity:.25; box-shadow:none;}
 
   /* ---------- proof / feature ---------- */
   .proof{
@@ -287,19 +250,6 @@
     box-shadow:0 20px 48px -24px rgba(16,28,22,.28);
   }
   .proof__frame img{width:100%; height:auto;}
-  .proof__callout{
-    display:inline-flex;
-    align-items:center;
-    gap:.5rem;
-    margin-bottom:1.1rem;
-    padding:.4rem .8rem;
-    border-radius:999px;
-    background:var(--clay-100);
-    color:var(--clay-500);
-    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
-    font-size:.72rem;
-    letter-spacing:.06em;
-  }
   .proof__title{
     margin:0 0 .9rem;
     font-family:'Plus Jakarta Sans',system-ui,sans-serif;
@@ -543,7 +493,6 @@
   @media (max-width:860px){
     .hero, .proof{grid-template-columns:1fr;}
     .hero__frame{order:-1;}
-    .step{flex-direction:column; align-items:flex-start;}
     .plans{grid-template-columns:1fr;}
     .nav__login, .nav__links{display:none;}
     .legend__table thead{display:none;}
@@ -573,7 +522,6 @@
 
   <header class="hero">
     <div class="reveal">
-      <p class="eyebrow hero__eyebrow">Para toda la Región Metropolitana</p>
       <h1 class="hero__title">Encuentra tu hogar de una manera más fácil, rápida y entretenida.</h1>
       <p class="hero__sub">ZoneCheck te ayuda a encontrar la propiedad perfecta en menos tiempo y a un mejor precio.</p>
     </div>
@@ -587,30 +535,6 @@
       <p class="eyebrow section__eyebrow">Cómo funciona</p>
       <h2 class="section__title">Un mapa que se lee solo</h2>
       <p class="section__sub">Cada punto del mapa es una propiedad en venta. En segundos sabes dónde está la oportunidad y dónde la trampa.</p>
-      <div class="steps">
-        <div class="step">
-          <span class="step__dot step__dot--green" aria-hidden="true"></span>
-          <div class="step__content">
-            <h3 class="step__title">Verde = oportunidad</h3>
-            <p class="step__body">Su precio está por debajo de lo que vale. Mientras más grande el punto, mayor la ganga. Estos son los avisos que conviene visitar primero.</p>
-          </div>
-        </div>
-        <div class="step">
-          <span class="step__dot step__dot--red" aria-hidden="true"></span>
-          <div class="step__content">
-            <h3 class="step__title">Rojo = sobreprecio</h3>
-            <p class="step__body">Pide más de lo que corresponde. Un punto rojo grande es una señal de alerta clara; uno pequeño apenas se aleja del precio justo.</p>
-          </div>
-        </div>
-        <div class="step">
-          <span class="step__dot step__dot--ink" aria-hidden="true"></span>
-          <div class="step__content">
-            <h3 class="step__title">Haz clic y decide</h3>
-            <p class="step__body">Cualquier punto te muestra su precio, el precio justo estimado y sus detalles. Filtra por comuna, precio o superficie y guarda tus favoritas.</p>
-          </div>
-        </div>
-      </div>
-
       <div class="legend">
         <table class="legend__table">
           <caption>Los tres detalles que hay que mirar en cada punto</caption>
@@ -630,7 +554,7 @@
                 </span>
               </td>
               <td class="legend__name">Color</td>
-              <td>Te dice si conviene o no. <span class="legend__word--green">Verde</span> es más barata de lo que debería — una oportunidad. <span class="legend__word--red">Rojo</span> es más cara de lo que debería — un sobreprecio.</td>
+              <td>Te dice qué tan conveniente es la propiedad. Si es <span class="legend__word--green">verde</span> es más barata de lo que debería dadas sus características. Si es <span class="legend__word--red">rojo</span>, la propiedad está con sobreprecio, por lo que conviene negociar el precio.</td>
             </tr>
             <tr>
               <td class="legend__sample legend__sample--size">
@@ -641,7 +565,7 @@
                 </span>
               </td>
               <td class="legend__name">Tamaño</td>
-              <td>Te dice cuánto. Mientras más grande el punto, más se aleja del precio justo — para bien si es verde, para mal si es rojo.</td>
+              <td>Te dice qué tan alejado está el precio ofertado del precio justo. Entre más grande el círculo, más alejado está.</td>
             </tr>
             <tr>
               <td class="legend__sample">
@@ -651,7 +575,7 @@
                 </span>
               </td>
               <td class="legend__name">Transparencia</td>
-              <td>Te dice si vale la pena mirarla. Los puntos sólidos son los casos que realmente destacan, para bien o para mal. Los tenues están dentro de lo normal para su sector y se muestran solo como referencia.</td>
+              <td>Te dice si vale la pena mirarlo. Los puntos transparentes indican que el precio es normal dentro de su segmento, a diferencia de los sólidos. Conviene más mirar círculos que son sólidos y <span class="legend__word--green">verdes</span> para encontrar mejores oportunidades.</td>
             </tr>
           </tbody>
         </table>
@@ -665,9 +589,8 @@
         <img src="assets/mapa-popup.jpg" alt="Detalle de una propiedad: precio publicado, precio justo estimado y rango de precio razonable">
       </div>
       <div>
-        <span class="proof__callout">+26,4% sobre el precio justo</span>
         <h2 class="proof__title">Cada punto es una casa real, con todos los números a la vista</h2>
-        <p class="proof__body">Al hacer clic en cualquier punto del mapa ves el precio publicado, el precio justo estimado para esa propiedad y el rango dentro del cual sería una buena operación. Esta propiedad se pide un 26,4% más de lo que corresponde — exactamente el tipo de trampa que te ahorras.</p>
+        <p class="proof__body">Al hacer clic en cualquier punto del mapa ves el precio publicado, el precio justo estimado para esa propiedad y el rango dentro del cual sería una buena opción. Esta propiedad se pide más de lo que corresponde — exactamente el tipo de trampa que te ahorras.</p>
         <ul class="proof__list">
           <li><b>Precio publicado</b> Lo que pide el aviso hoy.</li>
           <li><b>Precio justo</b> Lo que realmente vale según su sector, tamaño y características.</li>
