@@ -67,7 +67,7 @@ schtasks /create /tn "CasasCrawlDiario" /tr '"<path>\run_daily_crawl.bat"' /sc d
 
 Price intervals (PASO 5e) come from conformalized quantile regression (three `HistGradientBoostingRegressor(loss='quantile')` models at q=0.05/0.50/0.95, calibrated **per price segment** — group-conditional/Mondrian conformal prediction, not a single global correction — because a single correction under-covered the most expensive deciles) rather than a fixed ±% threshold — a fixed threshold was measured to flag 43% of the inventory, indistinguishable from noise. A listing is flagged only if its real price falls outside its own predicted interval (PASO 5f), ranked by distance to the interval edge, not by raw residual.
 
-It writes `casas_limpios.xlsx` (full cleaned dataset), `casas_candidatas.xlsx` (test-set listings flagged as outside their predicted interval — under- **or** over-market, ranked by distance to the edge; listings that fall inside their interval are excluded, and train-set listings are excluded because their predictions are in-sample), plus the charts under `gráficos/` and two interactive maps (`gráficos/mapa_intervalos.html` for test only, `gráficos/mapa_intervalos_completo.html` for the full dataset with a filter toolbar — price range, comuna, dormitorios/baños/superficie minimums, all client-side JS/Leaflet, no external services) — all committed to the repo and overwritten on each run.
+It writes `casas_limpios.xlsx` (full cleaned dataset), `casas_candidatas.xlsx` (test-set listings flagged as outside their predicted interval — under- **or** over-market, ranked by distance to the edge; listings that fall inside their interval are excluded, and train-set listings are excluded because their predictions are in-sample), plus the charts under `gráficos/` and two interactive maps (`gráficos/mapa_intervalos.html` for test only, `web/mapa.html` for the full dataset with a filter toolbar — price range, comuna, dormitorios/baños/superficie minimums, all client-side JS/Leaflet, no external services) — all committed to the repo and overwritten on each run. `web/mapa.html` lives outside `gráficos/` (and is written there directly, not moved after the fact) because `web/login.html` redirects to it and the site serves it straight from `web/`.
 
 ### Synthetic categories on the map (`generar_datos_sinteticos.py`)
 
@@ -106,8 +106,8 @@ proyecto_casas.py   (EDA -> cleaning -> lat/lon imputation -> feature engineerin
         |         |
         |         v  (PASO 5i extra 3: tag + concat, no retraining)
         v
-casas_limpios.xlsx, casas_candidatas.xlsx, gráficos/*.png, gráficos/mapa_*.html
-        (committed, overwritten each run; mapa_intervalos_completo.html carries all four
+casas_limpios.xlsx, casas_candidatas.xlsx, gráficos/*.png, gráficos/mapa_intervalos.html, web/mapa.html
+        (committed, overwritten each run; web/mapa.html carries all four
         categories behind the toolbar's categoría filter)
 ```
 

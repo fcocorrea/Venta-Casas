@@ -56,9 +56,10 @@ PENDIENTES.md                   # estado del proyecto, decisiones tomadas, traba
   predicción (sub o sobrevaloradas), ordenadas por distancia al borde del intervalo.
 - `gráficos/mapa_intervalos.html` — mapa interactivo de las casas de test, coloreado por sub/sobre-
   valoración.
-- `gráficos/mapa_intervalos_completo.html` — mismo mapa sobre todo el dataset (train + test, con
-  las filas de train marcadas como diagnóstico, no como resultado con garantía estadística), con
-  barra de filtros por precio, dormitorios, baños, superficie y comuna.
+- `web/mapa.html` — mismo mapa sobre todo el dataset (train + test, con las filas de train marcadas
+  como diagnóstico, no como resultado con garantía estadística), con barra de filtros por precio,
+  dormitorios, baños, superficie y comuna. Vive en `web/` (no en `gráficos/`) porque el sitio lo
+  sirve directo desde ahí y `web/login.html` redirige a esa ruta.
 - `gráficos/*.png` — gráficos exploratorios (histogramas, correlaciones, dispersión).
 
 ## Automatización

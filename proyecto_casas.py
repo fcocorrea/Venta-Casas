@@ -75,7 +75,7 @@ print('Columnas:', ', '.join(deptos_df.columns.tolist()))
 # El scraper filtra por categoría/comuna en la URL de búsqueda (ver casas_scraper/spiders/casas.py),
 # pero Portal Inmobiliario a veces indexa bajo esa misma categoría terrenos, propiedades comerciales
 # o casas fuera de las tres comunas cuya descripción así lo sugiere -- eso solo se detecta leyendo
-# la publicación, no filtrando columnas. El mapa interactivo (gráficos/mapa_intervalos_completo.html)
+# la publicación, no filtrando columnas. El mapa interactivo (web/mapa.html)
 # tiene un botón "Eliminar esta casa" por publicación que exporta la URL a este archivo (una URL por
 # línea; líneas vacías o que empiezan con # se ignoran). Si el archivo no existe, no se excluye nada.
 EXCLUSIONES_MANUALES_TXT = 'exclusiones_manuales.txt'
@@ -2811,7 +2811,9 @@ print(f'{MAPA_HTML}: {len(mapa_datos)} casas de test graficadas '
 #     aplicarles esa misma corrección es circular, no es su desempeño fuera de muestra real.
 # El tooltip marca 'train'/'test' por punto para que quede transparente cuál es cuál.
 
-MAPA_COMPLETO_HTML = os.path.join(GRAFICOS_DIR, 'mapa_intervalos_completo.html')
+# Vive en web/ (no en GRAFICOS_DIR) porque ahí es donde login.html redirige y el sitio lo sirve
+# directo -- guardarlo en gráficos/ obligaba a moverlo a mano después de cada corrida.
+MAPA_COMPLETO_HTML = os.path.join('web', 'mapa.html')
 
 X_codificado_completo = aplicar_codificacion(X, params_codificacion)
 X_final_completo = aplicar_escalado_numerico(X_codificado_completo, params_escalado)
@@ -3118,19 +3120,19 @@ css_toolbar = """
 }
 .vd-moneda-toggle:hover { border-color: #3E8B5D; color: #2E6E48; }
 .vd-moneda-toggle:active { transform: scale(0.96); }
-.vd-categoria-tabs {
-  display: flex; flex-wrap: nowrap; overflow-x: auto; gap: 3px; margin-right: 10px;
-  padding: 3px; background: #EFE8D5; border-radius: 999px; scrollbar-width: none;
-}
-.vd-categoria-tabs::-webkit-scrollbar { display: none; }
+.vd-panel-categoria { min-width: 220px; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
 .vd-categoria-tab {
-  border: none; background: transparent; padding: 7px 13px; border-radius: 999px;
-  font-family: inherit; font-size: 12px; font-weight: 700; color: #4B5048;
-  cursor: pointer; white-space: nowrap; transition: background 0.15s ease, color 0.15s ease;
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; text-align: left; border: none; background: none; border-radius: 8px;
+  padding: 9px 10px; font-family: inherit; font-size: 12.5px; font-weight: 600;
+  color: #24352C; cursor: pointer; transition: background 0.15s ease, color 0.15s ease;
 }
-.vd-categoria-tab:hover { color: #101C16; }
-.vd-categoria-tab.vd-categoria-activa { background: #3E8B5D; color: #ffffff; }
+.vd-categoria-tab:hover { background: #F7F4EC; }
+.vd-categoria-tab.vd-categoria-activa { background: #E3EFDF; color: #2E6E48; font-weight: 800; }
+.vd-categoria-tab__check { color: #3E8B5D; font-weight: 800; visibility: hidden; }
+.vd-categoria-tab.vd-categoria-activa .vd-categoria-tab__check { visibility: visible; }
 .vd-group { position: relative; }
+.vd-group--derecha { margin-left: auto; }
 .vd-group__button {
   display: flex; align-items: center; gap: 7px;
   background: transparent; border: 1px solid transparent; border-radius: 999px;
@@ -3185,6 +3187,7 @@ css_toolbar = """
   max-height: 190px; overflow-y: auto;
 }
 .vd-valor-exacto { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.vd-valor-exacto--fantasma { visibility: hidden; }
 .vd-valor-exacto input[type="number"] {
   width: 76px; border: 1px solid #E6E0CD; border-radius: 6px; padding: 4px 6px;
   font-size: 12.5px; font-family: inherit; color: #24352C;
@@ -3230,7 +3233,7 @@ css_toolbar = """
 .vd-accion:hover { background: #F7F4EC; }
 .vd-counter {
   font-size: 11.5px; color: #848D82; font-weight: 700; white-space: nowrap;
-  margin-left: auto; padding: 7px 12px; background: #F7F4EC; border-radius: 999px;
+  padding: 7px 12px; background: #F7F4EC; border-radius: 999px;
 }
 .vd-popup-wrap { position: relative; padding-bottom: 32px; }
 .vd-popup-iconos { position: absolute; bottom: 0; right: 0; display: flex; gap: 6px; }
@@ -3293,6 +3296,7 @@ css_toolbar = """
 @media (max-width: 760px) {
   #toolbar-filtros { padding: 8px 10px; }
   .vd-brand__tag { display: none; }
+  .vd-group--derecha { margin-left: 0; }
   .vd-counter { margin-left: 0; width: 100%; order: 99; }
   .vd-mega-panel { min-width: 0; }
   .vd-mega-grid { grid-template-columns: 1fr; }
@@ -3314,13 +3318,23 @@ def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, p
     # panel flotante -- eso era lo que hacía que el toolbar se sintiera como una fila interminable
     # de botones. `permitir_valor_exacto` agrega dos <input type="number"> arriba del slider --
     # alternativa para escribir el monto exacto en vez de arrastrar. Por ahora solo Precio lo pide.
-    campos_exactos = ''
     if permitir_valor_exacto:
         campos_exactos = f"""
       <div class="vd-valor-exacto">
         <input type="number" id="exacto-{prefijo}-min" aria-label="Valor mínimo exacto" placeholder="Desde">
         <span>–</span>
         <input type="number" id="exacto-{prefijo}-max" aria-label="Valor máximo exacto" placeholder="Hasta">
+      </div>"""
+    else:
+        # Fila fantasma de la misma altura, pero invisible: sin ella, el campo Precio (la única
+        # con esta fila) queda más alto que sus vecinos de fila en el grid de 2 columnas, y el
+        # grid estira esa fila entera para acomodarlo -- pero no re-centra el contenido de las
+        # celdas más cortas, así que el slider de cada campo terminaba a una altura distinta.
+        campos_exactos = """
+      <div class="vd-valor-exacto vd-valor-exacto--fantasma" aria-hidden="true">
+        <input type="number" tabindex="-1" disabled>
+        <span>–</span>
+        <input type="number" tabindex="-1" disabled>
       </div>"""
     return f"""
   <div class="vd-mega-field" data-grupo="{prefijo}">
@@ -3344,15 +3358,24 @@ def bloque_slider(prefijo: str, etiqueta: str, valor_min: int, valor_max: int, p
 
 categoria_tabs_html = ''.join(
     f'<button type="button" class="vd-categoria-tab{" vd-categoria-activa" if categoria == CATEGORIA_INICIAL else ""}" '
-    f'data-categoria="{categoria}">{etiqueta}</button>'
+    f'data-categoria="{categoria}" role="option" aria-selected="{"true" if categoria == CATEGORIA_INICIAL else "false"}">'
+    f'<span>{etiqueta}</span><span class="vd-categoria-tab__check">✓</span></button>'
     for categoria, etiqueta in ETIQUETA_CATEGORIA.items()
 )
 
 html_toolbar = f"""
 <div id="toolbar-filtros">
   <a class="vd-brand" href="index.html"><span>ZoneCheck</span><span class="vd-brand__tag">Mapa</span></a>
-  <div class="vd-categoria-tabs" role="tablist" aria-label="Categoría de propiedad">
-    {categoria_tabs_html}
+
+  <div class="vd-group" data-grupo="categoria">
+    <button type="button" class="vd-group__button vd-group__button--principal" aria-haspopup="listbox" aria-label="Categoría de propiedad">
+      <span class="vd-group__icon">🏠</span>
+      <span class="vd-group__label" id="etiqueta-categoria-activa">{ETIQUETA_CATEGORIA[CATEGORIA_INICIAL]}</span>
+      <span class="vd-group__icon">▾</span>
+    </button>
+    <div class="vd-panel vd-panel-categoria" role="listbox" aria-label="Categoría de propiedad">
+      {categoria_tabs_html}
+    </div>
   </div>
   <button type="button" class="vd-moneda-toggle" id="toggle-moneda" title="Cambiar precios entre CLP y UF">UF</button>
 
@@ -3384,9 +3407,22 @@ html_toolbar = f"""
     </div>
   </div>
 
-  <div class="vd-group" data-grupo="leyenda">
+  <div class="vd-group" data-grupo="mas">
+    <button type="button" class="vd-group__button vd-group__button--icono" aria-label="Más acciones" title="Más acciones">⋯</button>
+    <div class="vd-panel vd-panel-derecha vd-panel-acciones">
+      <button type="button" class="vd-accion" id="filtro-reset">↺ Restablecer filtros</button>
+      <button type="button" class="vd-accion" id="descargar-eliminadas"
+              title="Descarga las URLs marcadas con 'Eliminar esta propiedad' como exclusiones_manuales.txt -- guárdalo en la raíz del proyecto para que el próximo análisis las excluya">
+        🗑 Exportar eliminadas (<span id="contador-eliminadas">0</span>)
+      </button>
+    </div>
+  </div>
+
+  <!-- Favoritos y la leyenda van pegados al borde derecho del toolbar (separados del resto por
+       vd-group--derecha, la única con margin-left:auto), lejos de categoría/filtros/moneda. -->
+  <div class="vd-group vd-group--derecha" data-grupo="leyenda">
     <button type="button" class="vd-group__button vd-group__button--icono" aria-label="Cómo leer el mapa" title="Cómo leer el mapa">◐</button>
-    <div class="vd-panel vd-panel-leyenda">
+    <div class="vd-panel vd-panel-derecha vd-panel-leyenda">
       <p class="vd-leyenda-titulo">Cómo leer los círculos</p>
 
       <div class="vd-leyenda-bloque">
@@ -3444,17 +3480,6 @@ html_toolbar = f"""
     </div>
   </div>
 
-  <div class="vd-group" data-grupo="mas">
-    <button type="button" class="vd-group__button vd-group__button--icono" aria-label="Más acciones" title="Más acciones">⋯</button>
-    <div class="vd-panel vd-panel-derecha vd-panel-acciones">
-      <button type="button" class="vd-accion" id="filtro-reset">↺ Restablecer filtros</button>
-      <button type="button" class="vd-accion" id="descargar-eliminadas"
-              title="Descarga las URLs marcadas con 'Eliminar esta propiedad' como exclusiones_manuales.txt -- guárdalo en la raíz del proyecto para que el próximo análisis las excluya">
-        🗑 Exportar eliminadas (<span id="contador-eliminadas">0</span>)
-      </button>
-    </div>
-  </div>
-
   <span class="vd-counter" id="filtro-contador"></span>
 </div>
 """
@@ -3490,6 +3515,7 @@ datosCasasMapa.forEach(function(d) {{
         fillOpacity: d.fillOpacity, opacity: d.opacity, weight: 2,
     }}).bindPopup(d.popupClp);
     m._datos = d;
+    enlazarClicMarcador(m);
     m.addTo({nombre_js_mapa});
     marcadoresMapa.push(m);
 }});
@@ -3518,7 +3544,70 @@ function actualizarRadiosPorZoom() {{
 {nombre_js_mapa}.on('zoomend', actualizarRadiosPorZoom);
 actualizarRadiosPorZoom();
 
+// Varios avisos pueden caer en la misma latitud/longitud (o casi) -- por ejemplo, mismo edificio,
+// distintos avisos -- y el círculo de encima tapa por completo a los de abajo, dejándolos
+// imposibles de seleccionar. Al hacer clic sobre un grupo solapado los separamos en abanico
+// alrededor del punto real (con una "pata" que los conecta) en vez de abrir el popup del que
+// quedó encima, para que un segundo clic sí pueda elegir el que se quiere.
+var grupoDesplegadoActual = null;
+var patasDesplegadas = [];
+
+function colapsarDesenganche() {{
+    if (!grupoDesplegadoActual) {{ return; }}
+    grupoDesplegadoActual.forEach(function(m) {{
+        if (m._latlngOriginal) {{ m.setLatLng(m._latlngOriginal); delete m._latlngOriginal; }}
+    }});
+    patasDesplegadas.forEach(function(pata) {{ {nombre_js_mapa}.removeLayer(pata); }});
+    patasDesplegadas = [];
+    grupoDesplegadoActual = null;
+}}
+
+// El desplazamiento se hace en píxeles de pantalla (no en metros) para que el abanico se vea igual
+// de separado sin importar el zoom -- se deshace en colapsarDesenganche, incluyendo al primer
+// pan/zoom (ver 'movestart zoomstart' más abajo), así que nunca queda una posición falsa guardada.
+function desplegarGrupo(grupo, puntoCentro) {{
+    colapsarDesenganche();
+    var factor = factorRadioPorZoom({nombre_js_mapa}.getZoom());
+    var radioMayor = Math.max.apply(null, grupo.map(function(m) {{ return m._datos.radio; }})) * factor;
+    var radioSeparacion = Math.max(28, radioMayor * 2.4);
+    var n = grupo.length;
+    grupo.forEach(function(m, i) {{
+        m._latlngOriginal = m.getLatLng();
+        var angulo = -Math.PI / 2 + i * (2 * Math.PI / n);
+        var destino = L.point(puntoCentro.x + radioSeparacion * Math.cos(angulo), puntoCentro.y + radioSeparacion * Math.sin(angulo));
+        var nuevaLatLng = {nombre_js_mapa}.containerPointToLatLng(destino);
+        m.setLatLng(nuevaLatLng);
+        patasDesplegadas.push(L.polyline([m._latlngOriginal, nuevaLatLng], {{color: '#666', weight: 1, opacity: 0.55, interactive: false}}).addTo({nombre_js_mapa}));
+    }});
+    grupoDesplegadoActual = grupo;
+}}
+
+function manejarClicMarcador(marcador, e) {{
+    L.DomEvent.stopPropagation(e);
+    var puntoClic = {nombre_js_mapa}.latLngToContainerPoint(marcador.getLatLng());
+    var grupo = marcadoresMapa.filter(function(candidato) {{
+        if (candidato._eliminada || !{nombre_js_mapa}.hasLayer(candidato)) {{ return false; }}
+        var punto = {nombre_js_mapa}.latLngToContainerPoint(candidato.getLatLng());
+        var radioSuma = (candidato._datos.radio + marcador._datos.radio) * factorRadioPorZoom({nombre_js_mapa}.getZoom());
+        return puntoClic.distanceTo(punto) <= radioSuma;
+    }});
+    if (grupo.length <= 1) {{ marcador.openPopup(); return; }}
+    desplegarGrupo(grupo, puntoClic);
+}}
+
+function enlazarClicMarcador(m) {{
+    m.off('click');
+    m.on('click', function(e) {{ manejarClicMarcador(m, e); }});
+}}
+
+// Cualquier pan/zoom deja obsoletos los desplazamientos en píxeles del abanico, y un clic fuera de
+// cualquier marcador es la señal natural de "ya elegí, guarda el resto" -- en ambos casos conviene
+// colapsarlo antes que dejarlo desalineado o estorbando.
+{nombre_js_mapa}.on('movestart zoomstart', colapsarDesenganche);
+{nombre_js_mapa}.on('click', colapsarDesenganche);
+
 function aplicarFiltrosMapaCompleto() {{
+    colapsarDesenganche();
     var precioMin = parseFloat(document.getElementById('rango-precio-min').value) * 1e6;
     var precioMax = parseFloat(document.getElementById('rango-precio-max').value) * 1e6;
     var dormMin = parseFloat(document.getElementById('rango-dormitorios-min').value);
@@ -3836,6 +3925,9 @@ document.getElementById('toggle-moneda').addEventListener('click', function() {{
     marcadoresMapa.forEach(function(m) {{
         m.unbindPopup();
         m.bindPopup(monedaActual === 'CLP' ? m._datos.popupClp : m._datos.popupUf);
+        // bindPopup vuelve a registrar su propio listener de clic -- re-enlazar el nuestro encima
+        // evita que compita con el desacople de círculos solapados (ver enlazarClicMarcador).
+        enlazarClicMarcador(m);
     }});
 }});
 
@@ -3844,10 +3936,19 @@ document.getElementById('toggle-moneda').addEventListener('click', function() {{
 // de la categoría, así que esos dos controles quedan como estaban.
 document.querySelectorAll('.vd-categoria-tab').forEach(function(boton) {{
     boton.addEventListener('click', function() {{
+        // Es una lista dentro de un .vd-group desplegable (ver el listener genérico de
+        // .vd-group__button más abajo, que ya la abre/cierra) -- elegir una opción también la
+        // cierra, como cualquier selector, en vez de dejarla abierta hasta un clic afuera.
+        boton.closest('.vd-group').classList.remove('vd-abierto');
         if (boton.classList.contains('vd-categoria-activa')) {{ return; }}
-        document.querySelectorAll('.vd-categoria-tab').forEach(function(b) {{ b.classList.remove('vd-categoria-activa'); }});
+        document.querySelectorAll('.vd-categoria-tab').forEach(function(b) {{
+            b.classList.remove('vd-categoria-activa');
+            b.setAttribute('aria-selected', 'false');
+        }});
         boton.classList.add('vd-categoria-activa');
+        boton.setAttribute('aria-selected', 'true');
         categoriaActual = boton.dataset.categoria;
+        document.getElementById('etiqueta-categoria-activa').textContent = ETIQUETAS_CATEGORIA_JS[categoriaActual];
 
         var limites = limitesPorCategoria[categoriaActual];
         sliderPrecio.establecerLimites(limites.precio[0], limites.precio[1]);
