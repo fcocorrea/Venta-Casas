@@ -117,6 +117,7 @@
   width: 34px; height: 34px; padding: 0; justify-content: center; border-radius: 50%;
   font-size: 15px; color: #4B5048; border-color: #E6E0CD; background: #ffffff;
 }
+.vd-group__button--info { font-family: Georgia, 'Times New Roman', serif; font-style: italic; font-weight: 700; }
 .vd-badge {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
@@ -140,6 +141,18 @@
 }
 .vd-group:hover .vd-panel, .vd-group.vd-abierto .vd-panel, .vd-group:focus-within .vd-panel {
   opacity: 1; visibility: visible; transform: translateY(0);
+}
+/* La leyenda ("Cómo leer el mapa") es la única excepción a "hover también abre el panel" (ver
+   comentario sobre el toolbar más abajo) -- a pedido explícito, debe abrir solo con clic, para no
+   taparle el mapa a quien solo pasó el mouse de camino a otro botón del toolbar. Los `:not()`
+   son necesarios porque el cursor sigue "encima" del botón justo después de clickearlo -- sin
+   ellos, esta regla (más específica que `.vd-group.vd-abierto .vd-panel`) taparía el panel que el
+   propio clic acaba de abrir. */
+.vd-group[data-grupo="leyenda"]:hover:not(.vd-abierto):not(:focus-within) .vd-group__button {
+  background: #ffffff; border-color: #E6E0CD; color: #4B5048;
+}
+.vd-group[data-grupo="leyenda"]:hover:not(.vd-abierto):not(:focus-within) .vd-panel {
+  opacity: 0; visibility: hidden; transform: translateY(-4px);
 }
 .vd-mega-panel { min-width: 560px; max-width: min(680px, calc(100vw - 24px)); }
 .vd-mega-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 24px; }
@@ -190,6 +203,10 @@
 .vd-slider input[type="range"]::-moz-range-track { background: transparent; }
 .vd-slider input[type="range"]:focus-visible::-webkit-slider-thumb { outline: 2px solid #3E8B5D; outline-offset: 2px; }
 .vd-slider-values { display: flex; justify-content: space-between; font-size: 12px; color: #4B5048; margin-top: 2px; }
+/* El slider dual (precio/dormitorios/etc.) posiciona `.vd-slider__fill` por JS entre sus dos
+   thumbs (left Y width). El de Tamaño de los círculos es de un solo thumb -- el relleno siempre
+   arranca en el borde izquierdo, así que `left` queda fijo acá y JS solo toca `width`. */
+.vd-slider--simple .vd-slider__fill { left: 0; }
 .vd-checklist { display: flex; flex-direction: column; }
 .vd-checklist label { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 13px; cursor: pointer; color: #24352C; }
 .vd-panel-acciones { display: flex; flex-direction: column; gap: 2px; min-width: 230px; padding: 8px; }
@@ -402,6 +419,25 @@
     </div>
   </div>
 
+  <div class="vd-group" data-grupo="tamano">
+    <button type="button" class="vd-group__button vd-group__button--icono" aria-label="Tamaño de los círculos" title="Tamaño de los círculos">⊙</button>
+    <div class="vd-panel">
+      <div class="vd-mega-field__head">
+        <span class="vd-group__label">Tamaño de los círculos</span>
+        <span class="vd-group__value" id="resumen-tamano">100%</span>
+      </div>
+      <div class="vd-slider vd-slider--simple">
+        <div class="vd-slider__track"></div>
+        <div class="vd-slider__fill" id="relleno-tamano"></div>
+        <input type="range" id="rango-tamano" min="50" max="200" value="100" step="10">
+      </div>
+      <div class="vd-slider-values">
+        <span>Pequeño</span>
+        <span>Grande</span>
+      </div>
+    </div>
+  </div>
+
   <div class="vd-group" data-grupo="mas">
     <button type="button" class="vd-group__button vd-group__button--icono" aria-label="Más acciones" title="Más acciones">⋯</button>
     <div class="vd-panel vd-panel-derecha vd-panel-acciones">
@@ -416,7 +452,7 @@
   <!-- Favoritos y la leyenda van pegados al borde derecho del toolbar (separados del resto por
        vd-group--derecha, la única con margin-left:auto), lejos de categoría/filtros/moneda. -->
   <div class="vd-group vd-group--derecha" data-grupo="leyenda">
-    <button type="button" class="vd-group__button vd-group__button--icono" aria-label="Cómo leer el mapa" title="Cómo leer el mapa">◐</button>
+    <button type="button" class="vd-group__button vd-group__button--icono vd-group__button--info" aria-label="Cómo leer el mapa" title="Cómo leer el mapa">i</button>
     <div class="vd-panel vd-panel-derecha vd-panel-leyenda">
       <p class="vd-leyenda-titulo">Cómo leer los círculos</p>
 
@@ -528,6 +564,11 @@ datosCasasMapa.forEach(function(d) {
 var ZOOM_REFERENCIA_RADIO = 12;
 var ZOOM_MINIMO_RADIO = 8;
 var FACTOR_RADIO_MINIMO = 0.35;
+// Multiplicador manual del slider "Tamaño de los círculos" (ver #rango-tamano más abajo) -- se
+// combina con el factor de zoom en vez de reemplazarlo, para que el usuario pueda agrandar/achicar
+// los puntos en cualquier nivel de zoom sin perder el ajuste automático que evita que se solapen al
+// alejar el mapa.
+var factorTamanoUsuario = 1;
 
 function factorRadioPorZoom(zoom) {
     if (zoom >= ZOOM_REFERENCIA_RADIO) { return 1; }
@@ -537,11 +578,26 @@ function factorRadioPorZoom(zoom) {
 }
 
 function actualizarRadiosPorZoom() {
-    var factor = factorRadioPorZoom(map_e5ad3aef390b880309d33a9cafd08200.getZoom());
+    var factor = factorRadioPorZoom(map_e5ad3aef390b880309d33a9cafd08200.getZoom()) * factorTamanoUsuario;
     marcadoresMapa.forEach(function(m) { m.setRadius(Math.max(1, m._datos.radio * factor)); });
 }
 map_e5ad3aef390b880309d33a9cafd08200.on('zoomend', actualizarRadiosPorZoom);
 actualizarRadiosPorZoom();
+
+var elTamano = document.getElementById('rango-tamano');
+var rellenoTamano = document.getElementById('relleno-tamano');
+var resumenTamano = document.getElementById('resumen-tamano');
+
+function actualizarSliderTamano() {
+    var min = parseFloat(elTamano.min), max = parseFloat(elTamano.max), valor = parseFloat(elTamano.value);
+    rellenoTamano.style.width = ((valor - min) / (max - min) * 100) + '%';
+    resumenTamano.innerText = valor + '%';
+    resumenTamano.classList.toggle('vd-group__value--activo', valor !== 100);
+    factorTamanoUsuario = valor / 100;
+    actualizarRadiosPorZoom();
+}
+elTamano.addEventListener('input', actualizarSliderTamano);
+actualizarSliderTamano();
 
 // Varios avisos pueden caer en la misma latitud/longitud (o casi) -- por ejemplo, mismo edificio,
 // distintos avisos -- y el círculo de encima tapa por completo a los de abajo, dejándolos
@@ -583,6 +639,11 @@ function desplegarGrupo(grupo, puntoCentro) {
 
 function manejarClicMarcador(marcador, e) {
     L.DomEvent.stopPropagation(e);
+    // El hover ya aclaró el color para dar sensación de "botón" -- al clickear, aunque el mouse
+    // siga encima (o el marcador se reubique en el abanico de desenganche, ver desplegarGrupo,
+    // donde el cursor nunca queda "sobre" la nueva posición y por lo tanto mouseout jamás dispara),
+    // hay que forzar la vuelta al color original en vez de esperar un mouseout que podría no llegar.
+    marcador.setStyle({ color: marcador._datos.color, fillColor: marcador._datos.color });
     var puntoClic = map_e5ad3aef390b880309d33a9cafd08200.latLngToContainerPoint(marcador.getLatLng());
     var grupo = marcadoresMapa.filter(function(candidato) {
         if (candidato._eliminada || !map_e5ad3aef390b880309d33a9cafd08200.hasLayer(candidato)) { return false; }
@@ -594,9 +655,35 @@ function manejarClicMarcador(marcador, e) {
     desplegarGrupo(grupo, puntoClic);
 }
 
+// Cache por color exacto (hoy solo 'red'/'green', ver color_por_residuo en Python) para no crear y
+// destruir un <div> de medición en cada mouseover -- se resuelve el color vía getComputedStyle en
+// vez de mezclar el string a mano porque el mapa no controla si el color llega como nombre CSS,
+// hex o rgb().
+var cacheColoresClaros = {};
+function obtenerColorClaro(colorCss) {
+    if (cacheColoresClaros[colorCss]) { return cacheColoresClaros[colorCss]; }
+    var medidor = document.createElement('div');
+    medidor.style.color = colorCss;
+    document.body.appendChild(medidor);
+    var rgb = getComputedStyle(medidor).color.match(/[0-9]+/g).map(Number);
+    document.body.removeChild(medidor);
+    var factorAclarado = 0.35;
+    var claro = 'rgb(' + rgb.map(function(canal) { return Math.round(canal + (255 - canal) * factorAclarado); }).join(',') + ')';
+    cacheColoresClaros[colorCss] = claro;
+    return claro;
+}
+
 function enlazarClicMarcador(m) {
     m.off('click');
     m.on('click', function(e) { manejarClicMarcador(m, e); });
+    m.off('mouseover');
+    m.on('mouseover', function() {
+        m.setStyle({ color: obtenerColorClaro(m._datos.color), fillColor: obtenerColorClaro(m._datos.color) });
+    });
+    m.off('mouseout');
+    m.on('mouseout', function() {
+        m.setStyle({ color: m._datos.color, fillColor: m._datos.color });
+    });
 }
 
 // Cualquier pan/zoom deja obsoletos los desplazamientos en píxeles del abanico, y un clic fuera de
@@ -982,6 +1069,11 @@ document.querySelectorAll('.vd-group__button').forEach(function(boton) {
         var yaAbierto = grupo.classList.contains('vd-abierto');
         document.querySelectorAll('.vd-group.vd-abierto').forEach(function(g) { g.classList.remove('vd-abierto'); });
         if (!yaAbierto) { grupo.classList.add('vd-abierto'); }
+        // Al cerrar, el botón sigue enfocado (el click no le quita el foco) y `:focus-within`
+        // seguiría mostrando el panel aunque ya no tenga `vd-abierto` -- afecta sobre todo a la
+        // leyenda, que depende solo del clic (ver `.vd-group[data-grupo="leyenda"]` más arriba),
+        // ya que en el resto el hover disimula el problema.
+        else { boton.blur(); }
     });
 });
 document.addEventListener('click', function(e) {

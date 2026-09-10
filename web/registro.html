@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Crea tu cuenta en ZoneCheck y accede al mapa interactivo con el precio justo estimado de cada propiedad en venta y en arriendo de toda la Región Metropolitana.">
+<title>ZoneCheck — Crea tu cuenta</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper-0:#ffffff;
+    --paper-50:#f7f4ec;
+    --paper-100:#efe8d5;
+    --ink-900:#101c16;
+    --ink-700:#24352c;
+    --moss-500:#3e8b5d;
+    --moss-600:#2e6e48;
+    --moss-100:#e3efdf;
+    --clay-500:#c24b3b;
+    --clay-100:#f6e2dc;
+    --graphite-600:#4b5048;
+    --graphite-400:#848d82;
+    --line-200:#e6e0cd;
+    --focus-ring:#2e6e48;
+  }
+
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+    background:var(--paper-0);
+    color:var(--ink-700);
+  }
+  img{display:block; max-width:100%;}
+  a{color:inherit;}
+
+  @media (prefers-reduced-motion:no-preference){
+    .reveal{animation:rise .7s cubic-bezier(.2,.7,.2,1) both;}
+  }
+  @keyframes rise{from{opacity:0; transform:translateY(14px);}to{opacity:1; transform:none;}}
+
+  .eyebrow{
+    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+    font-weight:700;
+    font-size:.72rem;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+  }
+
+  .btn{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    gap:.4rem;
+    padding:.72rem 1.35rem;
+    border-radius:999px;
+    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+    font-size:.92rem;
+    font-weight:700;
+    text-decoration:none;
+    cursor:pointer;
+    border:1px solid transparent;
+    transition:background-color .15s ease, color .15s ease, border-color .15s ease;
+  }
+  .btn--primary{background:var(--moss-500); color:#fff;}
+  .btn--primary:hover{background:var(--moss-600);}
+  .btn--ghost{background:transparent; color:var(--ink-900); border-color:var(--line-200);}
+  .btn--ghost:hover{border-color:var(--ink-900);}
+  .btn:focus-visible{outline:2px solid var(--focus-ring); outline-offset:2px;}
+
+  /* ---------- nav ---------- */
+  .nav{
+    position:sticky;
+    top:0;
+    z-index:10;
+    display:flex;
+    align-items:center;
+    padding:1.1rem clamp(1.5rem, 5vw, 4rem);
+    background:rgba(255,255,255,.92);
+    backdrop-filter:blur(6px);
+    border-bottom:1px solid var(--line-200);
+  }
+  .nav__mark{
+    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+    font-weight:800;
+    font-size:1.4rem;
+    letter-spacing:-.01em;
+    color:var(--ink-900);
+    text-decoration:none;
+  }
+  .nav__links{
+    display:flex;
+    align-items:center;
+    gap:1.4rem;
+    margin-left:2.5rem;
+  }
+  .nav__actions{display:flex; align-items:center; gap:1.4rem; margin-left:auto;}
+  .nav__login, .nav__link{
+    font-size:.92rem;
+    font-weight:600;
+    text-decoration:none;
+    color:var(--ink-700);
+  }
+  .nav__login:hover{color:var(--moss-600);}
+  .nav__link{color:var(--graphite-600);}
+  .nav__link:hover{color:var(--ink-900);}
+
+  /* ---------- hero / auth split ---------- */
+  .hero{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    align-items:stretch;
+  }
+  .hero > .reveal{
+    align-self:center;
+    padding:clamp(2.5rem, 6vw, 4.5rem) clamp(1.5rem, 4vw, 4rem);
+  }
+  .hero__title{
+    margin:0 0 .8rem;
+    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+    font-weight:700;
+    font-size:clamp(1.9rem, 3.2vw, 2.5rem);
+    line-height:1.12;
+    letter-spacing:-.01em;
+    color:var(--ink-900);
+  }
+  .hero__sub{
+    margin:0 0 1.8rem;
+    max-width:42ch;
+    font-size:1rem;
+    line-height:1.6;
+    color:var(--graphite-600);
+  }
+
+  .hero__frame{
+    position:relative;
+    overflow:hidden;
+    min-height:420px;
+  }
+  .hero__frame img{
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    object-fit:cover;
+    object-position:center;
+    transform:scale(1.35);
+    transform-origin:50% 45%;
+  }
+
+  /* ---------- registration form ---------- */
+  .auth-form{
+    display:flex;
+    flex-direction:column;
+    gap:1.2rem;
+    max-width:26rem;
+  }
+  .field{display:flex; flex-direction:column; gap:.4rem;}
+  .field__label{
+    font-size:.82rem;
+    font-weight:600;
+    color:var(--ink-900);
+  }
+  .field__input{
+    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+    font-size:.95rem;
+    padding:.72rem .9rem;
+    border:1px solid var(--line-200);
+    border-radius:8px;
+    background:var(--paper-0);
+    color:var(--ink-900);
+  }
+  .field__input::placeholder{color:var(--graphite-400);}
+  .field__input:focus{
+    outline:2px solid var(--focus-ring);
+    outline-offset:1px;
+    border-color:var(--focus-ring);
+  }
+  .field__error{
+    margin:.15rem 0 0;
+    font-size:.8rem;
+    color:var(--clay-500);
+    display:none;
+  }
+  .field--invalid .field__input{border-color:var(--clay-500);}
+  .field--invalid .field__error{display:block;}
+
+  .plan-select{
+    display:flex;
+    flex-direction:column;
+    gap:.4rem;
+  }
+  .plan-select__options{
+    display:flex;
+    flex-wrap:wrap;
+    gap:.6rem;
+  }
+  .plan-option{
+    flex:1 1 auto;
+    position:relative;
+  }
+  .plan-option input{
+    position:absolute;
+    opacity:0;
+    inset:0;
+    margin:0;
+    cursor:pointer;
+  }
+  .plan-option__card{
+    display:block;
+    padding:.65rem .85rem;
+    border:1px solid var(--line-200);
+    border-radius:10px;
+    font-size:.86rem;
+    font-weight:600;
+    color:var(--ink-700);
+    text-align:center;
+    white-space:nowrap;
+    transition:border-color .15s ease, background-color .15s ease, color .15s ease;
+  }
+  .plan-option input:checked + .plan-option__card{
+    border-color:var(--moss-500);
+    background:var(--moss-100);
+    color:var(--moss-600);
+  }
+  .plan-option input:focus-visible + .plan-option__card{
+    outline:2px solid var(--focus-ring);
+    outline-offset:2px;
+  }
+
+  .auth-terms{
+    display:flex;
+    align-items:flex-start;
+    gap:.6rem;
+    font-size:.85rem;
+    line-height:1.5;
+    color:var(--graphite-600);
+  }
+  .auth-terms input{margin-top:.2rem;}
+  .auth-terms a{color:var(--moss-600); text-decoration:underline;}
+
+  .auth-form__submit{margin-top:.2rem; width:100%;}
+
+  .auth-foot{
+    margin:1.4rem 0 0;
+    font-size:.88rem;
+    color:var(--graphite-600);
+  }
+  .auth-foot a{color:var(--moss-600); font-weight:600; text-decoration:underline;}
+  .auth-foot a:focus-visible{outline:2px solid var(--focus-ring); outline-offset:2px;}
+
+  /* ---------- footer ---------- */
+  .footer{
+    background:var(--paper-50);
+    border-top:1px solid var(--line-200);
+    padding:clamp(2.5rem, 5vw, 3.5rem) clamp(1.5rem, 5vw, 4rem) 1.8rem;
+    font-size:.85rem;
+    color:var(--graphite-600);
+  }
+  .footer__grid{
+    max-width:1180px;
+    margin:0 auto;
+    display:grid;
+    grid-template-columns:1.4fr 1fr 1fr 1fr;
+    gap:2.5rem;
+    padding-bottom:2.2rem;
+  }
+  .footer__mark{
+    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+    font-weight:800;
+    font-size:1.25rem;
+    color:var(--ink-900);
+    text-decoration:none;
+  }
+  .footer__tagline{margin:.6rem 0 1.1rem; max-width:30ch; line-height:1.55;}
+  .footer__col h4{
+    margin:0 0 .9rem;
+    font-family:'Plus Jakarta Sans',system-ui,sans-serif;
+    font-size:.75rem;
+    font-weight:800;
+    letter-spacing:.1em;
+    text-transform:uppercase;
+    color:var(--ink-900);
+  }
+  .footer__col ul{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.55rem;}
+  .footer__col a{color:var(--graphite-600); text-decoration:none;}
+  .footer__col a:hover{color:var(--moss-600); text-decoration:underline;}
+  .footer__col a:focus-visible{outline:2px solid var(--focus-ring); outline-offset:2px;}
+  .footer__bottom{
+    max-width:1180px;
+    margin:0 auto;
+    padding-top:1.5rem;
+    border-top:1px solid var(--line-200);
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    justify-content:space-between;
+    gap:1rem;
+    font-size:.78rem;
+    color:var(--graphite-400);
+  }
+  @media (max-width:860px){
+    .footer__grid{grid-template-columns:1fr 1fr;}
+  }
+  @media (max-width:520px){
+    .footer__grid{grid-template-columns:1fr;}
+  }
+
+  /* ---------- responsive ---------- */
+  @media (max-width:860px){
+    .hero{grid-template-columns:1fr;}
+    .hero__frame{order:-1; min-height:260px;}
+    .nav__login, .nav__links{display:none;}
+  }
+</style>
+</head>
+<body>
+
+  <nav class="nav">
+    <a class="nav__mark" href="index.html">ZoneCheck</a>
+    <div class="nav__links">
+      <a class="nav__link" href="index.html#como-funciona">Cómo funciona</a>
+      <a class="nav__link" href="index.html#cobertura">Cobertura</a>
+      <a class="nav__link" href="index.html#precios">Precios</a>
+    </div>
+    <div class="nav__actions">
+      <a class="nav__login" href="login.html">Iniciar sesión</a>
+      <a class="btn btn--primary" href="#registro-form">Registrarse</a>
+    </div>
+  </nav>
+
+  <header class="hero">
+    <div class="reveal" id="registro-form">
+      <p class="eyebrow" style="color:var(--clay-500); margin:0 0 .8rem;">Crea tu cuenta</p>
+      <h1 class="hero__title">Empieza a ver el precio justo de cada propiedad.</h1>
+      <p class="hero__sub">3 días gratis para probar ZoneCheck. Sin permanencia, cancela cuando quieras.</p>
+
+      <form class="auth-form" id="registro-form-el" novalidate>
+        <label class="field">
+          <span class="field__label">Nombre completo</span>
+          <input class="field__input" type="text" name="nombre" autocomplete="name" required placeholder="Tu nombre">
+        </label>
+
+        <label class="field">
+          <span class="field__label">Correo electrónico</span>
+          <input class="field__input" type="email" name="email" autocomplete="email" required placeholder="tu@correo.cl">
+        </label>
+
+        <label class="field">
+          <span class="field__label">Contraseña</span>
+          <input class="field__input" type="password" name="password" autocomplete="new-password" required minlength="8" placeholder="Mínimo 8 caracteres">
+        </label>
+
+        <div class="field" id="confirm-field">
+          <label class="field__label" for="confirm-password">Confirmar contraseña</label>
+          <input class="field__input" type="password" id="confirm-password" name="confirm-password" autocomplete="new-password" required placeholder="Repite tu contraseña">
+          <p class="field__error">Las contraseñas no coinciden.</p>
+        </div>
+
+        <div class="plan-select">
+          <span class="field__label">¿Qué quieres encontrar?</span>
+          <div class="plan-select__options">
+            <label class="plan-option">
+              <input type="radio" name="plan" value="arriendos">
+              <span class="plan-option__card">Arriendos</span>
+            </label>
+            <label class="plan-option">
+              <input type="radio" name="plan" value="ambos" checked>
+              <span class="plan-option__card">Arriendos + Ventas</span>
+            </label>
+            <label class="plan-option">
+              <input type="radio" name="plan" value="ventas">
+              <span class="plan-option__card">Ventas</span>
+            </label>
+          </div>
+        </div>
+
+        <label class="auth-terms">
+          <input type="checkbox" name="terminos" required>
+          <span>Acepto los <a href="#">Términos de servicio</a> y la <a href="#">Política de privacidad</a> de ZoneCheck.</span>
+        </label>
+
+        <button class="btn btn--primary auth-form__submit" type="submit">Crear cuenta y probar 3 días gratis</button>
+      </form>
+
+      <p class="auth-foot">¿Ya tienes cuenta? <a href="login.html">Inicia sesión</a></p>
+    </div>
+
+    <div class="hero__frame reveal">
+      <img src="assets/mapa-fondo.jpg" alt="Mapa de ZoneCheck mostrando oportunidades y propiedades sobrevaloradas en la Región Metropolitana">
+    </div>
+  </header>
+
+  <footer class="footer">
+    <div class="footer__grid">
+      <div>
+        <a class="footer__mark" href="index.html">ZoneCheck</a>
+        <p class="footer__tagline">El mapa inteligente de propiedades bajo precio en la Región Metropolitana.</p>
+      </div>
+      <nav class="footer__col" aria-label="Explorar">
+        <h4>Explorar</h4>
+        <ul>
+          <li><a href="index.html#como-funciona">Cómo funciona</a></li>
+          <li><a href="index.html#cobertura">Cobertura</a></li>
+          <li><a href="index.html#precios">Precios</a></li>
+        </ul>
+      </nav>
+      <nav class="footer__col" aria-label="Soporte">
+        <h4>Soporte</h4>
+        <ul>
+          <li><a href="mailto:hola@zonecheck.cl">Escríbenos</a></li>
+          <li><a href="#">Preguntas frecuentes</a></li>
+        </ul>
+      </nav>
+      <nav class="footer__col" aria-label="Legal">
+        <h4>Legal</h4>
+        <ul>
+          <li><a href="#">Términos de servicio</a></li>
+          <li><a href="#">Política de privacidad</a></li>
+        </ul>
+      </nav>
+    </div>
+    <div class="footer__bottom">
+      <span>© 2026 ZoneCheck · Toda la Región Metropolitana</span>
+      <span>Precios estimados por modelos de inteligencia artificial al valor del mercado; no constituyen una tasación comercial.</span>
+    </div>
+  </footer>
+
+  <script>
+    const form = document.getElementById('registro-form-el');
+    const confirmField = document.getElementById('confirm-field');
+    const confirmInput = document.getElementById('confirm-password');
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const passwordsMatch = form.password.value === confirmInput.value;
+      confirmField.classList.toggle('field--invalid', !passwordsMatch);
+      if (!passwordsMatch) {
+        confirmInput.focus();
+        return;
+      }
+      window.location.href = 'login.html';
+    });
+  </script>
+</body>
+</html>
